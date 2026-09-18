@@ -17,6 +17,10 @@ color_names = {
 }
 
 
+class ObjectNotFound(ValueError):
+    """В кадре нет достаточно крупного предмета, отличающегося от фона."""
+
+
 def readImage(image_path: Path) -> np.ndarray:
     """Загрузить BGR-изображение, в том числе по пути с кириллицей."""
     image = cv2.imdecode(np.fromfile(image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -62,8 +66,8 @@ def segmentObject(image: np.ndarray, roi: tuple | None = None) -> np.ndarray:
     candidates = [label for label in range(1, count)
                   if label not in border_labels and stats[label, cv2.CC_STAT_AREA] >= min_area]
     if not candidates:
-        raise ValueError("Объект не найден на чёрном фоне. Поместите предмет целиком внутри "
-                         "кадра/ROI; проверьте освещение и контраст с лентой.")
+        raise ObjectNotFound("Объект не найден на чёрном фоне. Поместите предмет целиком внутри "
+                             "кадра/ROI; проверьте освещение и контраст с лентой.")
     object_label = max(candidates, key=lambda label: stats[label, cv2.CC_STAT_AREA])
     selected = labels == object_label
     # Проверяем исходные пиксели: сглаживание не должно добавлять тёмный фон в маску.
@@ -71,7 +75,7 @@ def segmentObject(image: np.ndarray, roi: tuple | None = None) -> np.ndarray:
     object_mask = np.zeros((height, width), dtype=np.uint8)
     object_mask[y:y + roi_height, x:x + roi_width] = (selected & original_foreground).astype(np.uint8) * 255
     if np.count_nonzero(object_mask) < 25:
-        raise ValueError("После исключения фона объект слишком мал для определения цвета.")
+        raise ObjectNotFound("После исключения фона объект слишком мал для определения цвета.")
     return object_mask
 
 
@@ -132,9 +136,8 @@ def saveImage(path: Path, image: np.ndarray) -> None:
     encoded.tofile(path)
 
 
-def saveResults(image: np.ndarray, result: dict, object_mask: np.ndarray,
-                output_dir: Path, stem: str) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
+def drawResult(image: np.ndarray, result: dict, object_mask: np.ndarray) -> np.ndarray:
+    """Нарисовать контур и цвет одинаково для фотографий и видео."""
     annotated = image.copy()
     contours, _ = cv2.findContours(object_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     line_width = max(2, round(min(image.shape[:2]) / 400))
@@ -152,6 +155,13 @@ def saveResults(image: np.ndarray, result: dict, object_mask: np.ndarray,
                   (min(image.shape[1] - 1, x + text_size[0] + 8), label_y + baseline), (255, 255, 255), -1)
     cv2.putText(annotated, label, (x + 4, label_y), cv2.FONT_HERSHEY_SIMPLEX,
                 font_scale, (0, 0, 0), line_width, cv2.LINE_AA)
+    return annotated
+
+
+def saveResults(image: np.ndarray, result: dict, object_mask: np.ndarray,
+                output_dir: Path, stem: str) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    annotated = drawResult(image, result, object_mask)
     saveImage(output_dir / f"{stem}_result.jpg", annotated)
     saveImage(output_dir / f"{stem}_mask.png", object_mask)
     (output_dir / f"{stem}_result.json").write_text(
