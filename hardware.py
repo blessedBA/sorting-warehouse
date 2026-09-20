@@ -1,0 +1,282 @@
+"""API оборудования склада: Arduino/ESP32 с управлением по serial."""
+
+import math
+import time
+
+import serial
+
+
+class Hardware:
+    """Перемещение головки по XY и интерфейс будущих узлов склада.
+
+    Протокол sketch_sep22a.ino: ASCII, строки с '\n', 115200 бод, координаты
+    в миллиметрах. OK подтверждает команду, DONE — окончание выдачи шагов XY.
+    Класс рассчитан на последовательные вызовы из одного потока.
+    """
+
+    def __init__(self, com_port: str = "COM3", baudrate: int = 115200,
+                 timeout: float = 1, startup_timeout: float = 5,
+                 movement_timeout: float = 60, servo_settle_time: float | None = None):
+        for value in (timeout, startup_timeout, movement_timeout):
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError("Таймауты должны быть конечными положительными числами")
+        if servo_settle_time is not None and (not math.isfinite(servo_settle_time) or servo_settle_time <= 0):
+            raise ValueError("Выдержка сервопривода должна быть конечным положительным числом")
+        if baudrate != 115200:
+            raise ValueError("В sketch_sep22a.ino задана скорость 115200 бод")
+        self.com_port = com_port
+        self.baudrate = baudrate
+        self.timeout = timeout
+        self.startup_timeout = startup_timeout
+        self.movement_timeout = movement_timeout
+        self.servo_settle_time = servo_settle_time
+        self.arduino = None
+        self._response_buffer = bytearray()
+        self._synchronized = False
+        self._movement_pending = False
+        self._servo_pending = False
+        self._servo_command_time = 0.0
+        self.init()
+
+    def init(self) -> None:
+        """Открыть порт и дождаться READY; после ошибки синхронизироваться через STOP."""
+        if self.arduino is not None and self.arduino.is_open:
+            if not self._synchronized:
+                self.stop()
+            return
+        self._response_buffer.clear()
+        self._synchronized = False
+        self._movement_pending = False
+        self._servo_pending = False
+        self.arduino = serial.Serial(
+            self.com_port, self.baudrate, timeout=0, write_timeout=self.timeout
+        )
+        try:
+            self._waitForResponse("READY", self.startup_timeout)
+            self._synchronized = True
+        except BaseException:
+            self.arduino.close()
+            raise
+
+    def send(self, command: str) -> None:
+        """Низкоуровневая отправка; для ожидания команды используйте методы ниже."""
+        self._checkConnection()
+        if not command or "\n" in command or "\r" in command:
+            raise ValueError("Нужна одна непустая команда без переводов строки")
+        data = (command + "\n").encode("ascii")
+        if self.arduino.write(data) != len(data):
+            self._synchronized = False
+            raise RuntimeError("Команда передана в serial-порт не полностью")
+
+    def _checkConnection(self) -> None:
+        if self.arduino is None or not self.arduino.is_open:
+            raise RuntimeError("Arduino не подключена. Вызовите init().")
+
+    def _popResponse(self) -> str | None:
+        """Извлечь только полную строку; фрагменты остаются до следующего чтения."""
+        if b"\n" not in self._response_buffer:
+            return None
+        line, _, tail = self._response_buffer.partition(b"\n")
+        self._response_buffer = bytearray(tail)
+        return line.decode("ascii").strip()
+
+    def _readLine(self, deadline: float) -> str:
+        self._checkConnection()
+        while True:
+            response = self._popResponse()
+            if response:
+                return response
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Истекло время ожидания ответа Arduino")
+            data = self.arduino.read(self.arduino.in_waiting or 1)
+            if data:
+                self._response_buffer.extend(data)
+            else:
+                time.sleep(min(0.01, remaining))
+
+    def _handleResponse(self, response: str) -> None:
+        if response == "OK":
+            self._movement_pending = True
+        elif response in ("DONE", "STOPPED", "ZEROED"):
+            self._movement_pending = False
+        elif response.startswith("SERVO "):
+            angle = int(response[6:])
+            if not 0 <= angle <= 180:
+                raise RuntimeError(f"Некорректный ответ сервопривода: {response}")
+            self._servo_pending = True
+            self._servo_command_time = time.monotonic()
+        elif response.startswith("POS "):
+            coordinates = response.split()[1:]
+            if len(coordinates) != 2 or not all(math.isfinite(float(value)) for value in coordinates):
+                raise RuntimeError(f"Некорректные координаты Arduino: {response}")
+        elif response in ("ERROR", "UNKNOWN"):
+            raise RuntimeError(f"Arduino отклонила команду: {response}")
+        elif response == "READY":
+            raise RuntimeError("Arduino перезапустилась; координаты сброшены")
+        else:
+            raise RuntimeError(f"Неизвестный ответ Arduino: {response}")
+
+    def _waitForResponse(self, expected: str, timeout: float, recovering: bool = False) -> list[str]:
+        deadline = time.monotonic() + timeout
+        responses = []
+        try:
+            while True:
+                response = self._readLine(deadline)
+                if response == "READY" and expected == "READY":
+                    return [response]
+                self._handleResponse(response)
+                responses.append(response)
+                if response == expected or (expected == "POS" and response.startswith("POS ")):
+                    return responses
+                # DONE может прийти от предыдущего движения до ответа на новую команду.
+                # STOPPED служит границей синхронизации после запоздалых ответов.
+                if response != "DONE" and not recovering:
+                    raise RuntimeError(f"Ожидался ответ {expected}, получен {response}")
+        except Exception:
+            self._synchronized = False
+            raise
+
+    def _request(self, command: str, expected: str) -> list[str]:
+        self._checkConnection()
+        if not self._synchronized and command != "STOP":
+            raise RuntimeError("Протокол рассинхронизирован. Вызовите stop() или переподключитесь.")
+        try:
+            self.send(command)
+            return self._waitForResponse(expected, self.timeout, recovering=command == "STOP")
+        except Exception:
+            self._synchronized = False
+            raise
+
+    def readResponse(self) -> list[str]:
+        """Прочитать доступные полные строки, сохранив состояние OK/DONE."""
+        self._checkConnection()
+        responses = []
+        try:
+            self._response_buffer.extend(self.arduino.read(self.arduino.in_waiting))
+            while (response := self._popResponse()) is not None:
+                if response:
+                    self._handleResponse(response)
+                    responses.append(response)
+        except Exception:
+            self._synchronized = False
+            raise
+        return responses
+
+    def zero(self) -> list[str]:
+        """Остановить головку и сбросить координаты в ноль."""
+        responses = self.stop()
+        return responses + self._request("ZERO", "ZEROED")
+
+    def goto(self, x: float, y: float) -> list[str]:
+        """Задать абсолютную цель в миллиметрах; дождаться OK, но не DONE."""
+        if not math.isfinite(x) or not math.isfinite(y):
+            raise ValueError("Координаты должны быть конечными числами")
+        return self._request(f"GOTO {x} {y}", "OK")
+
+    def move(self, dx: float, dy: float) -> list[str]:
+        """Задать смещения в миллиметрах от положения на момент каждой команды MOVE."""
+        if not math.isfinite(dx) or not math.isfinite(dy):
+            raise ValueError("Смещения должны быть конечными числами")
+        responses = []
+        if dx != 0:
+            responses.extend(self._request(f"MOVE X {dx}", "OK"))
+        if dy != 0:
+            responses.extend(self._request(f"MOVE Y {dy}", "OK"))
+        return responses
+
+    def jog(self, axis: str, direction: int) -> list[str]:
+        """Команды X+/X-/Y+/Y-: цель на 1000000 шагов от текущей позиции, до STOP."""
+        axis = axis.upper()
+        if axis not in ("X", "Y") or direction not in (-1, 1):
+            raise ValueError("Ось должна быть X или Y, направление — -1 или 1")
+        sign = "+" if direction == 1 else "-"
+        return self._request(f"{axis}{sign}", "OK")
+
+    def getPosition(self) -> list[str]:
+        """Получить POS x y: программные координаты в мм, округлённые до сотых."""
+        return self._request("POS?", "POS")
+
+    def stop(self) -> list[str]:
+        """Остановить только XY, дождаться STOPPED; сервопривод команда не останавливает."""
+        responses = self._request("STOP", "STOPPED")
+        self._synchronized = True
+        return responses
+
+    def setServo(self, angle: int) -> list[str]:
+        """Задать целый угол 0–180°; SERVO angle подтверждает лишь принятие команды."""
+        if type(angle) is not int or not 0 <= angle <= 180:
+            raise ValueError("Угол сервопривода должен быть целым числом от 0 до 180")
+        return self._request(f"SERVO {angle}", f"SERVO {angle}")
+
+    def open(self) -> None:
+        """Открыть затвор: установить заданный угол сервопривода 37 градусов."""
+        self.setServo(37)
+
+    def close(self) -> None:
+        """Закрыть затвор: установить заданный угол сервопривода 127 градусов."""
+        self.setServo(127)
+
+    def set_speed(self, speed: float) -> None:
+        """TODO: задать скорость и дождаться её установки; 0 — полная остановка.
+
+        Определить команду, единицы, диапазон и таймаут ожидания.
+        """
+        raise NotImplementedError("Управление скоростью конвейера пока не реализовано")
+
+    def get_weight(self) -> float:
+        """TODO: вернуть стабильную массу текущего объекта в граммах после тарирования.
+
+        Лента остановлена. Определить протокол TAL222/HX711 и таймаут измерения.
+        """
+        raise NotImplementedError("Чтение тензодатчика пока не реализовано")
+
+    def waitForMovement(self) -> None:
+        """Дождаться DONE по XY в пределах movement_timeout; датчиков позиции нет."""
+        self._checkConnection()
+        if not self._synchronized:
+            raise RuntimeError("Нет синхронизации с Arduino. Вызовите stop().")
+        self.readResponse()
+        if self._movement_pending:
+            self._waitForResponse("DONE", self.movement_timeout)
+
+    def waitUntilIdle(self) -> None:
+        """Дождаться DONE по XY и откалиброванной выдержки после команды сервоприводу.
+
+        Прошивка не подтверждает физическое положение серво. Без заданного
+        servo_settle_time ожидание после SERVO остаётся плейсхолдером.
+        """
+        self.waitForMovement()
+        if self._servo_pending:
+            if self.servo_settle_time is None:
+                raise NotImplementedError("Задайте servo_settle_time: прошивка не сообщает о завершении движения серво")
+            remaining = self._servo_command_time + self.servo_settle_time - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
+            self._servo_pending = False
+
+    def feedOneObject(self) -> None:
+        """TODO: подать измеренный объект с остановленной ленты в тару головки.
+
+        Вернуться только после попадания ровно одного объекта в тару и остановки
+        ленты. Объект должен покинуть зону измерения. Следующий объект не должен
+        упасть следом. Нужны датчик/дозатор или проверенная механика подачи,
+        контроль завершения и таймаут; одной установки скорости недостаточно.
+        """
+        raise NotImplementedError("Подача ровно одного объекта пока не реализована")
+
+    def waitForUnload(self) -> None:
+        """TODO: подтвердить выход объекта из тары перед закрытием затвора.
+
+        Использовать датчик или откалиброванную выдержку; предусмотреть таймаут.
+        """
+        raise NotImplementedError("Ожидание выгрузки объекта пока не реализовано")
+
+    def disconnect(self) -> None:
+        """Отправить STOP и освободить порт, даже если отправка не удалась."""
+        if self.arduino is not None and self.arduino.is_open:
+            try:
+                self.stop()
+            finally:
+                self.arduino.close()
+                self._synchronized = False
