@@ -16,7 +16,7 @@ class Hardware:
 
     def __init__(self, com_port: str = "COM3", baudrate: int = 115200,
                  timeout: float = 1, startup_timeout: float = 5,
-                 movement_timeout: float = 60, servo_settle_time: float | None = None):
+                 movement_timeout: float = 60, servo_settle_time: float | None = 2):
         for value in (timeout, startup_timeout, movement_timeout):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError("Таймауты должны быть конечными положительными числами")
@@ -96,6 +96,7 @@ class Hardware:
                 time.sleep(min(0.01, remaining))
 
     def _handleResponse(self, response: str) -> None:
+        print("RESPONCE " + response)
         if response == "OK":
             self._movement_pending = True
         elif response in ("DONE", "STOPPED", "ZEROED"):
@@ -222,6 +223,9 @@ class Hardware:
 
         Определить команду, единицы, диапазон и таймаут ожидания.
         """
+
+        # FIXME 
+        return
         raise NotImplementedError("Управление скоростью конвейера пока не реализовано")
 
     def get_weight(self) -> float:
@@ -229,6 +233,8 @@ class Hardware:
 
         Лента остановлена. Определить протокол TAL222/HX711 и таймаут измерения.
         """
+        # FIXME
+        return 50
         raise NotImplementedError("Чтение тензодатчика пока не реализовано")
 
     def waitForMovement(self) -> None:
@@ -263,6 +269,8 @@ class Hardware:
         упасть следом. Нужны датчик/дозатор или проверенная механика подачи,
         контроль завершения и таймаут; одной установки скорости недостаточно.
         """
+        # FIXME
+        return
         raise NotImplementedError("Подача ровно одного объекта пока не реализована")
 
     def waitForUnload(self) -> None:
@@ -270,6 +278,9 @@ class Hardware:
 
         Использовать датчик или откалиброванную выдержку; предусмотреть таймаут.
         """
+        # FIXME
+        time.sleep(2)
+        return
         raise NotImplementedError("Ожидание выгрузки объекта пока не реализовано")
 
     def disconnect(self) -> None:

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import math
 import sys
 import time
+import random
 
 
 @dataclass
@@ -45,6 +46,8 @@ def selectCell(color: str, weight: float) -> int:
     определить принадлежность граничных значений и отказ для неизвестного цвета
     или массы вне диапазона. Произвольная ячейка по умолчанию не выбирается.
     """
+    # FIXME
+    return random.randint(1, 9)
     raise NotImplementedError("Правила сортировки по цвету и массе пока не заданы")
 
 

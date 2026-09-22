@@ -40,7 +40,7 @@ class Camera:
         if self.capture is not None and self.capture.isOpened():
             return
         self.disconnect()
-        backend = cv2.CAP_AVFOUNDATION if sys.platform == "darwin" else cv2.CAP_ANY
+        backend = cv2.CAP_AVFOUNDATION if sys.platform == "darwin" else cv2.CAP_V4L2
         self.capture = cv2.VideoCapture(self.camera_index, backend)
         try:
             if not self.capture.isOpened():
@@ -87,6 +87,8 @@ class Camera:
         Нужно определить целевое положение, допуск и подтверждение по нескольким
         кадрам. Наличие предмета в ROI само по себе не подтверждает готовность.
         """
+        # FIXME
+        return True
         raise NotImplementedError("Проверка положения объекта на конвейере пока не реализована")
 
     def disconnect(self) -> None:
