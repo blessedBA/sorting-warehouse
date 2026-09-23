@@ -79,6 +79,10 @@ class Camera:
         использовать уже сделанный снимок. Старые результаты не сохраняются.
         """
         _, result, _ = self.processFrame(frame)
+        if result is not None:
+            print(result["color"])
+        else:
+            print("Объект или цвет не обнаружен!")
         return result
 
     def isObjectReady(self, result: dict | None) -> bool:

@@ -96,7 +96,6 @@ class Hardware:
                 time.sleep(min(0.01, remaining))
 
     def _handleResponse(self, response: str) -> None:
-        print("RESPONCE " + response)
         if response == "OK":
             self._movement_pending = True
         elif response in ("DONE", "STOPPED", "ZEROED"):
@@ -270,6 +269,7 @@ class Hardware:
         контроль завершения и таймаут; одной установки скорости недостаточно.
         """
         # FIXME
+        time.sleep(1)
         return
         raise NotImplementedError("Подача ровно одного объекта пока не реализована")
 

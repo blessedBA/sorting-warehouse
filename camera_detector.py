@@ -35,7 +35,7 @@ def drawStatus(frame: np.ndarray, status: str, fps: float) -> None:
 def runCamera(camera_index: int, width: int, height: int, roi: tuple | None,
               output_dir: Path) -> None:
     window_name = "Warehouse - live color"
-    backend = cv2.CAP_AVFOUNDATION if sys.platform == "darwin" else cv2.CAP_ANY
+    backend = cv2.CAP_AVFOUNDATION if sys.platform == "darwin" else cv2.CAP_V4L2
     capture = cv2.VideoCapture(camera_index, backend)
     window_created = False
     run_dir = None
