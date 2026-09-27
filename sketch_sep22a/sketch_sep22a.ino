@@ -10,7 +10,18 @@
 #define Y_DIR_PIN  3
 #define Y_EN_PIN   4
 
-#define SERVO_PIN 6
+#define SERVO_PIN 5
+
+// Реле конвейера
+#define RELAY_PIN 6
+
+// Уровни реле:
+// Если модуль реле активен HIGH — оставьте так.
+// Если активен LOW — поменяйте местами:
+// #define RELAY_ON  LOW
+// #define RELAY_OFF HIGH
+#define RELAY_ON  HIGH
+#define RELAY_OFF LOW
 
 // =============================
 // Настройки движения
@@ -38,8 +49,19 @@ unsigned long lastStepY = 0;
 // Флаг выполнения движения
 bool movementInProgress = false;
 
+// Состояние конвейера
+bool conveyorState = false;
+
 #include <Servo.h>
 Servo myServo;
+
+// =============================
+// Управление конвейером
+// =============================
+void setConveyor(bool on) {
+  conveyorState = on;
+  digitalWrite(RELAY_PIN, on ? RELAY_ON : RELAY_OFF);
+}
 
 // =============================
 // Настройка
@@ -52,18 +74,21 @@ void setup() {
   pinMode(Y_DIR_PIN, OUTPUT);
   pinMode(Y_EN_PIN, OUTPUT);
 
+  pinMode(RELAY_PIN, OUTPUT);
+  setConveyor(false);
+
   // A4988 активируется LOW
   digitalWrite(X_EN_PIN, LOW);
   digitalWrite(Y_EN_PIN, LOW);
-  
+
   digitalWrite(X_STEP_PIN, LOW);
   digitalWrite(Y_STEP_PIN, LOW);
 
   Serial.begin(115200);
-  
+
   myServo.attach(SERVO_PIN);
-  myServo.write(90); // Установим начальное положение 90 градусов
-  
+  myServo.write(90); // Начальное положение 90 градусов
+
   Serial.println("READY");
 }
 
@@ -94,10 +119,10 @@ void makeStepY(int direction) {
 // =============================
 void updateX() {
   if (positionX == targetX) return;
-  
+
   unsigned long currentMicros = micros();
   if (currentMicros - lastStepX < STEP_INTERVAL_US) return;
-  
+
   lastStepX = currentMicros;
   if (targetX > positionX) makeStepX(1);
   else makeStepX(-1);
@@ -108,10 +133,10 @@ void updateX() {
 // =============================
 void updateY() {
   if (positionY == targetY) return;
-  
+
   unsigned long currentMicros = micros();
   if (currentMicros - lastStepY < STEP_INTERVAL_US) return;
-  
+
   lastStepY = currentMicros;
   if (targetY > positionY) makeStepY(1);
   else makeStepY(-1);
@@ -143,14 +168,15 @@ void processCommand(String command) {
     args.trim();
     int separator = args.indexOf(' ');
     if (separator == -1) { Serial.println("ERROR"); return; }
-    
+
     String xString = args.substring(0, separator);
     String yString = args.substring(separator + 1);
-    xString.trim(); yString.trim();
-    
+    xString.trim();
+    yString.trim();
+
     float x = xString.toFloat();
     float y = yString.toFloat();
-    
+
     targetX = lround(x * X_STEPS_PER_MM);
     targetY = lround(y * Y_STEPS_PER_MM);
     movementInProgress = true;
@@ -163,18 +189,19 @@ void processCommand(String command) {
     String args = command.substring(4);
     args.trim();
     if (args.length() < 2) { Serial.println("ERROR"); return; }
-    
+
     char axis = args.charAt(0);
     String distanceString = args.substring(1);
     distanceString.trim();
     float distance = distanceString.toFloat();
-    
+
     if (axis == 'X' || axis == 'x') {
       targetX = positionX + lround(distance * X_STEPS_PER_MM);
     } else if (axis == 'Y' || axis == 'y') {
       targetY = positionY + lround(distance * Y_STEPS_PER_MM);
     } else {
-      Serial.println("ERROR"); return;
+      Serial.println("ERROR");
+      return;
     }
     movementInProgress = true;
     Serial.println("OK");
@@ -190,12 +217,42 @@ void processCommand(String command) {
       return;
     }
     int angle = args.toInt();
-    // Ограничиваем диапазон от 0 до 180 для безопасности сервопривода
-    angle = constrain(angle, 0, 180); 
-    
+    angle = constrain(angle, 0, 180);
+
     myServo.write(angle);
     Serial.print("SERVO ");
     Serial.println(angle);
+  }
+  // =============================
+  // CONVEYOR ON / CONVEYOR OFF / CONVEYOR?
+  // Также поддерживаются: CONV ON/OFF/?, RELAY ON/OFF/?
+  // =============================
+  else if (command.startsWith("CONVEYOR") || command.startsWith("CONV") || command.startsWith("RELAY")) {
+    String args;
+
+    if (command.startsWith("CONVEYOR")) {
+      args = command.substring(8);   // "CONVEYOR" = 8 символов
+    } else if (command.startsWith("CONV")) {
+      args = command.substring(4);   // "CONV" = 4 символа
+    } else {
+      args = command.substring(5);   // "RELAY" = 5 символов
+    }
+
+    args.trim();
+    args.toUpperCase();
+
+    if (args == "ON") {
+      setConveyor(true);
+      Serial.println("CONVEYOR ON");
+    } else if (args == "OFF") {
+      setConveyor(false);
+      Serial.println("CONVEYOR OFF");
+    } else if (args == "?" || args.length() == 0) {
+      Serial.print("CONVEYOR ");
+      Serial.println(conveyorState ? "ON" : "OFF");
+    } else {
+      Serial.println("ERROR");
+    }
   }
   // =============================
   // ZERO
@@ -246,7 +303,7 @@ void loop() {
     String command = Serial.readStringUntil('\n');
     processCommand(command);
   }
-  
+
   updateX();
   updateY();
   checkMovementFinished();

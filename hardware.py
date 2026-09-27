@@ -7,10 +7,11 @@ import serial
 
 
 class Hardware:
-    """Перемещение головки по XY и интерфейс будущих узлов склада.
+    """Перемещение головки по XY, управление сервоприводом и конвейером.
 
-    Протокол sketch_sep22a.ino: ASCII, строки с '\n', 115200 бод, координаты
+    Протокол обновлённого скетча: ASCII, строки с '\\n', 115200 бод, координаты
     в миллиметрах. OK подтверждает команду, DONE — окончание выдачи шагов XY.
+    CONVEYOR ON / CONVEYOR OFF подтверждают состояние конвейера.
     Класс рассчитан на последовательные вызовы из одного потока.
     """
 
@@ -23,7 +24,7 @@ class Hardware:
         if servo_settle_time is not None and (not math.isfinite(servo_settle_time) or servo_settle_time <= 0):
             raise ValueError("Выдержка сервопривода должна быть конечным положительным числом")
         if baudrate != 115200:
-            raise ValueError("В sketch_sep22a.ino задана скорость 115200 бод")
+            raise ValueError("В скетче задана скорость 115200 бод")
         self.com_port = com_port
         self.baudrate = baudrate
         self.timeout = timeout
@@ -36,6 +37,7 @@ class Hardware:
         self._movement_pending = False
         self._servo_pending = False
         self._servo_command_time = 0.0
+        self._conveyor_state = False
         self.init()
 
     def init(self) -> None:
@@ -48,6 +50,7 @@ class Hardware:
         self._synchronized = False
         self._movement_pending = False
         self._servo_pending = False
+        self._conveyor_state = False
         self.arduino = serial.Serial(
             self.com_port, self.baudrate, timeout=0, write_timeout=self.timeout
         )
@@ -110,6 +113,8 @@ class Hardware:
             coordinates = response.split()[1:]
             if len(coordinates) != 2 or not all(math.isfinite(float(value)) for value in coordinates):
                 raise RuntimeError(f"Некорректные координаты Arduino: {response}")
+        elif response in ("CONVEYOR ON", "CONVEYOR OFF"):
+            self._conveyor_state = (response == "CONVEYOR ON")
         elif response in ("ERROR", "UNKNOWN"):
             raise RuntimeError(f"Arduino отклонила команду: {response}")
         elif response == "READY":
@@ -117,7 +122,7 @@ class Hardware:
         else:
             raise RuntimeError(f"Неизвестный ответ Arduino: {response}")
 
-    def _waitForResponse(self, expected: str, timeout: float, recovering: bool = False) -> list[str]:
+    def _waitForResponse(self, expected, timeout: float, recovering: bool = False) -> list[str]:
         deadline = time.monotonic() + timeout
         responses = []
         try:
@@ -127,7 +132,12 @@ class Hardware:
                     return [response]
                 self._handleResponse(response)
                 responses.append(response)
-                if response == expected or (expected == "POS" and response.startswith("POS ")):
+                if isinstance(expected, (list, tuple)):
+                    if response in expected:
+                        return responses
+                elif response == expected or \
+                     (expected == "POS" and response.startswith("POS ")) or \
+                     (expected == "CONVEYOR" and response.startswith("CONVEYOR ")):
                     return responses
                 # DONE может прийти от предыдущего движения до ответа на новую команду.
                 # STOPPED служит границей синхронизации после запоздалых ответов.
@@ -137,7 +147,7 @@ class Hardware:
             self._synchronized = False
             raise
 
-    def _request(self, command: str, expected: str) -> list[str]:
+    def _request(self, command: str, expected) -> list[str]:
         self._checkConnection()
         if not self._synchronized and command != "STOP":
             raise RuntimeError("Протокол рассинхронизирован. Вызовите stop() или переподключитесь.")
@@ -210,22 +220,35 @@ class Hardware:
         return self._request(f"SERVO {angle}", f"SERVO {angle}")
 
     def open(self) -> None:
-        """Открыть затвор: установить заданный угол сервопривода 37 градусов."""
-        self.setServo(37)
-
-    def close(self) -> None:
-        """Закрыть затвор: установить заданный угол сервопривода 127 градусов."""
+        """Открыть затвор: установить заданный угол сервопривода 127 градусов."""
         self.setServo(127)
 
-    def set_speed(self, speed: float) -> None:
-        """TODO: задать скорость и дождаться её установки; 0 — полная остановка.
+    def close(self) -> None:
+        """Закрыть затвор: установить заданный угол сервопривода 37 градусов."""
+        self.setServo(37)
 
-        Определить команду, единицы, диапазон и таймаут ожидания.
-        """
+    def conveyor_on(self) -> list[str]:
+        """Включить конвейер."""
+        return self._request("CONVEYOR ON", "CONVEYOR ON")
 
-        # FIXME 
-        return
-        raise NotImplementedError("Управление скоростью конвейера пока не реализовано")
+    def conveyor_off(self) -> list[str]:
+        """Выключить конвейер."""
+        return self._request("CONVEYOR OFF", "CONVEYOR OFF")
+
+    def get_conveyor_state(self) -> bool:
+        """Запросить состояние конвейера. Возвращает True, если включён, иначе False."""
+        responses = self._request("CONVEYOR?", "CONVEYOR")
+        for r in responses:
+            if r.startswith("CONVEYOR "):
+                return r == "CONVEYOR ON"
+        raise RuntimeError("В ответе нет состояния конвейера")
+
+    def set_conveyor(self, on: bool) -> list[str]:
+        """Установить состояние конвейера: on=True — включить, on=False — выключить."""
+        if on:
+            return self.conveyor_on()
+        else:
+            return self.conveyor_off()
 
     def get_weight(self) -> float:
         """TODO: вернуть стабильную массу текущего объекта в граммах после тарирования.
