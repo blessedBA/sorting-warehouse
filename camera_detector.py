@@ -3,22 +3,13 @@
 import argparse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import sys
 import time
 
 import cv2
 import numpy as np
 
-from color_detector import ObjectNotFound, createRunDirectory, detectColor, drawResult, saveResults
-
-
-def processFrame(frame: np.ndarray, roi: tuple | None = None) -> tuple:
-    """Обработать текущий кадр, не перенося результат с предыдущего предмета."""
-    try:
-        result, object_mask = detectColor(frame, roi)
-    except ObjectNotFound:
-        return frame.copy(), None, None
-    return drawResult(frame, result, object_mask), result, object_mask
+from camera import Camera, processFrame
+from color_detector import createRunDirectory, saveResults
 
 
 def drawStatus(frame: np.ndarray, status: str, fps: float) -> None:
@@ -35,21 +26,11 @@ def drawStatus(frame: np.ndarray, status: str, fps: float) -> None:
 def runCamera(camera_index: int, width: int, height: int, roi: tuple | None,
               output_dir: Path) -> None:
     window_name = "Warehouse - live color"
-    backend = cv2.CAP_AVFOUNDATION if sys.platform == "darwin" else cv2.CAP_ANY
-    capture = cv2.VideoCapture(camera_index, backend)
+    camera = Camera(camera_index, width, height, roi)
     window_created = False
     run_dir = None
     snapshot_number = 0
     try:
-        if not capture.isOpened():
-            raise RuntimeError(
-                f"Не удалось открыть камеру {camera_index}. Проверьте подключение, закройте "
-                "другие программы с камерой и попробуйте --camera 1 (или 2). На Mac разрешите "
-                "доступ приложению запуска в «Системные настройки → Конфиденциальность "
-                "и безопасность → Камера», затем запустите программу снова.")
-        capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-        capture.set(cv2.CAP_PROP_FPS, 30)
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
         window_created = True
         cv2.resizeWindow(window_name, width, height)
@@ -59,13 +40,11 @@ def runCamera(camera_index: int, width: int, height: int, roi: tuple | None,
         fps = 0.0
         first_frame = True
         while True:
-            success, frame = capture.read()
-            if not success or frame is None:
-                raise RuntimeError("Камера перестала передавать изображение. Проверьте подключение и перезапустите программу.")
+            frame = camera.getFrame()
             if first_frame:
                 print(f"Камера {camera_index}: {frame.shape[1]}×{frame.shape[0]} пикселей.", flush=True)
                 first_frame = False
-            annotated, result, object_mask = processFrame(frame, roi)
+            annotated, result, object_mask = camera.processFrame(frame)
             now = time.perf_counter()
             current_fps = 1 / max(now - last_frame_time, 0.000001)
             fps = current_fps if fps == 0 else 0.9 * fps + 0.1 * current_fps
@@ -101,7 +80,7 @@ def runCamera(camera_index: int, width: int, height: int, roi: tuple | None,
                 except (OSError, ValueError, cv2.error) as error:
                     print(f"Не удалось сохранить снимок: {error}", flush=True)
     finally:
-        capture.release()
+        camera.disconnect()
         if window_created:
             cv2.destroyAllWindows()
 
