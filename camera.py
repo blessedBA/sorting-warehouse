@@ -8,10 +8,11 @@ import numpy as np
 from color_detector import ObjectNotFound, detectColor, drawResult
 
 
-def processFrame(frame: np.ndarray, roi: tuple | None = None) -> tuple:
+def processFrame(frame: np.ndarray, roi: tuple | None = None,
+                 background: str = "white") -> tuple:
     """Обработать текущий кадр, не перенося результат с предыдущего предмета."""
     try:
-        result, object_mask = detectColor(frame, roi)
+        result, object_mask = detectColor(frame, roi, background)
     except ObjectNotFound:
         return frame.copy(), None, None
     return drawResult(frame, result, object_mask), result, object_mask
@@ -20,18 +21,22 @@ def processFrame(frame: np.ndarray, roi: tuple | None = None) -> tuple:
 class Camera:
     """Камера без окна просмотра; ROI задаётся как (x, y, width, height).
 
-    Распознавание рассчитано на светлые или цветные предметы на чёрной ленте.
+    Режим background задаёт белый или чёрный фон конвейера.
     Каждый вызов обрабатывает один кадр, без отслеживания отдельных объектов.
     """
 
     def __init__(self, camera_index: int = 0, width: int = 960,
-                 height: int = 540, roi: tuple | None = None):
+                 height: int = 540, roi: tuple | None = None,
+                 background: str = "white"):
         if camera_index < 0 or min(width, height) < 32:
             raise ValueError("Индекс камеры должен быть неотрицательным, размеры кадра — не менее 32×32.")
+        if background not in ("white", "black"):
+            raise ValueError("Цвет фона должен быть white или black.")
         self.camera_index = camera_index
         self.width = width
         self.height = height
         self.roi = roi
+        self.background = background
         self.capture = None
         self.init()
 
@@ -40,7 +45,7 @@ class Camera:
         if self.capture is not None and self.capture.isOpened():
             return
         self.disconnect()
-        backend = cv2.CAP_AVFOUNDATION if sys.platform == "darwin" else cv2.CAP_ANY
+        backend = cv2.CAP_AVFOUNDATION if sys.platform == "darwin" else cv2.CAP_V4L2
         self.capture = cv2.VideoCapture(self.camera_index, backend)
         try:
             if not self.capture.isOpened():
@@ -69,16 +74,21 @@ class Camera:
         """Вернуть (кадр с обводкой, результат, маска) для переданного или нового кадра."""
         if frame is None:
             frame = self.getFrame()
-        return processFrame(frame, self.roi)
+        return processFrame(frame, self.roi, self.background)
 
     def detectObject(self, frame: np.ndarray | None = None) -> dict | None:
         """Вернуть данные предмета для управляющего скрипта или None, если его нет.
 
-        Поля: color, color_ru, dominant_share, ambiguous, rgb, bbox, color_shares.
+        Поля: color, color_ru, dominant_share, ambiguous, rgb, bbox,
+        color_shares, background.
         Без аргумента считывается новый кадр; переданный кадр позволяет повторно
         использовать уже сделанный снимок. Старые результаты не сохраняются.
         """
         _, result, _ = self.processFrame(frame)
+        if result is not None:
+            print(result["color"])
+        else:
+            print("Объект или цвет не обнаружен!")
         return result
 
     def isObjectReady(self, result: dict | None) -> bool:
@@ -87,6 +97,8 @@ class Camera:
         Нужно определить целевое положение, допуск и подтверждение по нескольким
         кадрам. Наличие предмета в ROI само по себе не подтверждает готовность.
         """
+        # FIXME
+        return True
         raise NotImplementedError("Проверка положения объекта на конвейере пока не реализована")
 
     def disconnect(self) -> None:

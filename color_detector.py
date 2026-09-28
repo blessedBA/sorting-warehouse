@@ -1,4 +1,9 @@
-"""Распознавание основного цвета одного предмета на фотографии."""
+"""Распознавание основного цвета одного предмета на фотографии.
+
+Поддерживает два режима фона:
+  - "white" (по умолчанию) — предмет на белом/светлом фоне;
+  - "black" — предмет на чёрном/тёмном фоне (прежнее поведение).
+"""
 
 import argparse
 import json
@@ -29,17 +34,26 @@ def readImage(image_path: Path) -> np.ndarray:
     return image
 
 
-def foregroundMask(image: np.ndarray, brightness_threshold: float) -> np.ndarray:
-    """Светлые и насыщенные пиксели, отличающиеся от чёрной ленты."""
+def foregroundMask(image: np.ndarray, brightness_threshold: float,
+                   background: str = "white") -> np.ndarray:
+    """Пиксели предмета, отличающиеся от фона.
+
+    background="white" — фон светлый/белый: предмет тёмный или насыщенный.
+    background="black" — фон тёмный/чёрный: предмет светлый или насыщенный.
+    """
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     saturation, value = hsv[:, :, 1], hsv[:, :, 2]
     chroma = image.max(axis=2).astype(np.int16) - image.min(axis=2)
     colorful = (saturation >= 65) & (value >= 65) & (chroma >= 40)
+    if background == "white":
+        # Белый фон: фон яркий и почти не насыщенный, предмет — темнее или цветной.
+        return (value < brightness_threshold) | colorful
     return (value > brightness_threshold) | colorful
 
 
-def segmentObject(image: np.ndarray, roi: tuple | None = None) -> np.ndarray:
-    """Выделить светлый/цветной предмет на чёрном фоне внутри ROI."""
+def segmentObject(image: np.ndarray, roi: tuple | None = None,
+                  background: str = "white") -> np.ndarray:
+    """Выделить предмет на фоне (белом или чёрном) внутри ROI."""
     height, width = image.shape[:2]
     if min(height, width) < 32:
         raise ValueError("Изображение должно быть размером не менее 32×32 пикселей.")
@@ -51,27 +65,32 @@ def segmentObject(image: np.ndarray, roi: tuple | None = None) -> np.ndarray:
         raise ValueError("ROI должна находиться внутри снимка и иметь размер не менее 3×3.")
 
     crop = image[y:y + roi_height, x:x + roi_width]
-    # Полное разрешение сохраняет тонкие предметы, медиана подавляет фактуру ленты.
+    # Полное разрешение сохраняет тонкие предметы, медиана подавляет фактуру фона.
     filtered = cv2.medianBlur(crop, 3)
     hsv = cv2.cvtColor(filtered, cv2.COLOR_BGR2HSV)
     value = hsv[:, :, 2]
     otsu_threshold, _ = cv2.threshold(value, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    brightness_threshold = max(95, otsu_threshold)
-    # Яркость для белого/серого, насыщенность и разность каналов для тёмных цветов.
-    foreground = foregroundMask(filtered, brightness_threshold).astype(np.uint8)
+    if background == "white":
+        # Фон — самая яркая часть кадра; Otsu отделяет тёмный предмет от белого.
+        brightness_threshold = min(240, max(30, otsu_threshold))
+    else:
+        brightness_threshold = max(95, otsu_threshold)
+    # Яркость (для белого/серого/чёрного) + насыщенность и разность каналов
+    # (для цветных предметов, которые могут быть близки по яркости к фону).
+    foreground = foregroundMask(filtered, brightness_threshold, background).astype(np.uint8)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(foreground, connectivity=8)
-    # Стол и другие области, выходящие за край кадра/ROI, не считаются предметами.
+    # Области, выходящие за край кадра/ROI, не считаются предметами.
     border_labels = np.unique(np.concatenate((labels[0], labels[-1], labels[:, 0], labels[:, -1])))
     min_area = max(25, roi_width * roi_height * 0.00005)
     candidates = [label for label in range(1, count)
                   if label not in border_labels and stats[label, cv2.CC_STAT_AREA] >= min_area]
     if not candidates:
-        raise ObjectNotFound("Объект не найден на чёрном фоне. Поместите предмет целиком внутри "
-                             "кадра/ROI; проверьте освещение и контраст с лентой.")
+        raise ObjectNotFound("Объект не найден. Поместите предмет целиком внутри кадра/ROI; "
+                             "проверьте освещение и контраст с фоном.")
     object_label = max(candidates, key=lambda label: stats[label, cv2.CC_STAT_AREA])
     selected = labels == object_label
-    # Проверяем исходные пиксели: сглаживание не должно добавлять тёмный фон в маску.
-    original_foreground = foregroundMask(crop, brightness_threshold)
+    # Проверяем исходные пиксели: сглаживание не должно добавлять фон в маску.
+    original_foreground = foregroundMask(crop, brightness_threshold, background)
     object_mask = np.zeros((height, width), dtype=np.uint8)
     object_mask[y:y + roi_height, x:x + roi_width] = (selected & original_foreground).astype(np.uint8) * 255
     if np.count_nonzero(object_mask) < 25:
@@ -99,9 +118,10 @@ def classifyPixels(pixels: np.ndarray) -> np.ndarray:
     return names
 
 
-def detectColor(image: np.ndarray, roi: tuple | None = None) -> tuple[dict, np.ndarray]:
+def detectColor(image: np.ndarray, roi: tuple | None = None,
+                background: str = "white") -> tuple[dict, np.ndarray]:
     """Вернуть описание цвета и маску; можно вызывать для кадров камеры."""
-    object_mask = segmentObject(image, roi)
+    object_mask = segmentObject(image, roi, background)
     # Отступ от контура уменьшает влияние фона и сглаженных краёв.
     kernel_size = max(3, round(min(image.shape[:2]) * 0.005) | 1)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
@@ -125,6 +145,7 @@ def detectColor(image: np.ndarray, roi: tuple | None = None) -> tuple[dict, np.n
         "bbox": {"x": x, "y": y, "width": width, "height": height},
         "color_shares": {str(names[index]): round(float(counts[index] / len(pixels)), 4)
                          for index in order},
+        "background": background,
     }
     return result, object_mask
 
@@ -192,6 +213,8 @@ def main() -> None:
                         help="Прямоугольник вокруг объекта в пикселях с небольшим запасом фона")
     parser.add_argument("--output-dir", type=Path, default=project_dir / "output",
                         help="Каталог, в котором создаются папки отдельных запусков")
+    parser.add_argument("--background", choices=("white", "black"), default="white",
+                        help="Цвет фона: white (по умолчанию) или black")
     args = parser.parse_args()
     try:
         batch_mode = args.image.is_dir()
@@ -215,12 +238,13 @@ def main() -> None:
     except OSError as error:
         parser.exit(1, f"Не удалось создать папку запуска: {error}\n")
     print(f"Папка запуска: {run_dir.resolve()}", flush=True)
+    print(f"Режим фона: {args.background}", flush=True)
     error_count = 0
     for image_number, image_path in enumerate(image_paths, start=1):
         print(f"\nФотография: {image_path.name}", flush=True)
         try:
             image = readImage(image_path)
-            result, object_mask = detectColor(image, args.roi)
+            result, object_mask = detectColor(image, args.roi, args.background)
             image_suffix = f"_{image_number:02d}" if len(image_paths) > 1 else ""
             output_stem = f"{run_dir.name}{image_suffix}"
             result["source_file"] = image_path.name

@@ -6,12 +6,14 @@ from dataclasses import dataclass, field
 import math
 import sys
 import time
+import random
 
 
 @dataclass
 class WarehouseConfig:
     # TODO: координаты в единицах прошивки, после калибровки системы координат.
     loading_position: tuple[float, float] | None = (9.0, 17.0)
+    zero: tuple[float, float] | None = (0.0, 0.0)
     cell_positions: dict[int, tuple[float, float] | None] = field(
         default_factory=lambda: {
             1: (4, 10),
@@ -25,7 +27,7 @@ class WarehouseConfig:
             9: (14, 0),
         }
     )
-    conveyor_speed: float | None = 10
+    conveyor_speed: float | None = 1
 
     def validate(self) -> None:
         if self.conveyor_speed is None or not math.isfinite(self.conveyor_speed) or self.conveyor_speed <= 0:
@@ -45,6 +47,8 @@ def selectCell(color: str, weight: float) -> int:
     определить принадлежность граничных значений и отказ для неизвестного цвета
     или массы вне диапазона. Произвольная ячейка по умолчанию не выбирается.
     """
+    # FIXME
+    return random.randint(1, 9)
     raise NotImplementedError("Правила сортировки по цвету и массе пока не заданы")
 
 
@@ -63,13 +67,15 @@ def createHardware(backend: str, port: str, baudrate: int):
 def sortOneObject(hardware, camera, config: WarehouseConfig) -> int:
     """Один цикл. config проверяется до запуска; ошибки прерывают сортировку."""
     # 1. Дождаться объекта в зоне измерения, затем остановить ленту.
-    hardware.set_speed(config.conveyor_speed)
+    hardware.conveyor_on()
     while True:
         result = camera.detectObject()
         if result is not None and camera.isObjectReady(result):
             break
         time.sleep(0.05)
-    hardware.set_speed(0)
+    hardware.conveyor_off()
+
+    print("Conveyor stoped")
 
     # 2. Цвет и масса относятся к объекту, оставшемуся в зоне после остановки.
     result = camera.detectObject()
@@ -92,12 +98,16 @@ def sortOneObject(hardware, camera, config: WarehouseConfig) -> int:
     hardware.goto(*config.loading_position)
     hardware.waitUntilIdle()
 
+    print("Ready to feed")
+
     # 5. Дождаться падения только измеренного объекта и остановки ленты.
     hardware.feedOneObject()
 
     # 6. Переместить объект к выбранной ячейке.
     hardware.goto(*config.cell_positions[cell])
     hardware.waitUntilIdle()
+
+    print("Went to cell")
 
     # 7–8. Открыть затвор, дождаться выгрузки, закрыть затвор.
     hardware.open()
@@ -111,7 +121,7 @@ def sortOneObject(hardware, camera, config: WarehouseConfig) -> int:
 def shutdownHardware(hardware) -> None:
     """Попытаться остановить оба механизма и освободить подключение независимо от ошибок."""
     actions = (
-        ("остановить конвейер", lambda: hardware.set_speed(0)),
+        ("остановить конвейер", lambda: hardware.conveyor_off),
         ("остановить головку", hardware.stop),
         ("отключить оборудование", hardware.disconnect),
     )
@@ -131,7 +141,7 @@ def runWarehouse(hardware, camera, config: WarehouseConfig) -> None:
     """
     try:
         config.validate()
-        hardware.set_speed(0)
+        hardware.conveyor_off()
         while True:
             cell = sortOneObject(hardware, camera, config)
             print(f"Объект помещён в ячейку {cell}", flush=True)
