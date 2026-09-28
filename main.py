@@ -13,6 +13,7 @@ import random
 class WarehouseConfig:
     # TODO: координаты в единицах прошивки, после калибровки системы координат.
     loading_position: tuple[float, float] | None = (9.0, 17.0)
+    zero: tuple[float, float] | None = (0.0, 0.0)
     cell_positions: dict[int, tuple[float, float] | None] = field(
         default_factory=lambda: {
             1: (4, 10),

@@ -1,4 +1,8 @@
-"""Живое изображение веб-камеры с контуром предмета и его цветом."""
+"""Живое изображение веб-камеры с контуром предмета и его цветом.
+
+Работает с предметами на белом фоне (по умолчанию) или на чёрном —
+режим задаётся ключом --background и передаётся в color_detector.
+"""
 
 import argparse
 from datetime import datetime, timedelta, timezone
@@ -12,10 +16,15 @@ import numpy as np
 from color_detector import ObjectNotFound, createRunDirectory, detectColor, drawResult, saveResults
 
 
-def processFrame(frame: np.ndarray, roi: tuple | None = None) -> tuple:
-    """Обработать текущий кадр, не перенося результат с предыдущего предмета."""
+def processFrame(frame: np.ndarray, roi: tuple | None = None,
+                 background: str = "white") -> tuple:
+    """Обработать текущий кадр, не перенося результат с предыдущего предмета.
+
+    Режим фона уходит напрямую в detectColor — никакого ручного маскирования:
+    color_detector сам отделяет предмет от белого или чёрного фона.
+    """
     try:
-        result, object_mask = detectColor(frame, roi)
+        result, object_mask = detectColor(frame, roi, background)
     except ObjectNotFound:
         return frame.copy(), None, None
     return drawResult(frame, result, object_mask), result, object_mask
@@ -33,7 +42,7 @@ def drawStatus(frame: np.ndarray, status: str, fps: float) -> None:
 
 
 def runCamera(camera_index: int, width: int, height: int, roi: tuple | None,
-              output_dir: Path) -> None:
+              output_dir: Path, background: str = "white") -> None:
     window_name = "Warehouse - live color"
     backend = cv2.CAP_AVFOUNDATION if sys.platform == "darwin" else cv2.CAP_V4L2
     capture = cv2.VideoCapture(camera_index, backend)
@@ -55,6 +64,7 @@ def runCamera(camera_index: int, width: int, height: int, roi: tuple | None,
         cv2.resizeWindow(window_name, width, height)
         print("Окно камеры открыто. Q / Esc — выход; S — сохранить текущий результат.", flush=True)
         print("Для горячих клавиш выберите окно камеры и английскую раскладку.", flush=True)
+        print(f"Режим фона: {background}.", flush=True)
         last_frame_time = time.perf_counter()
         fps = 0.0
         first_frame = True
@@ -65,7 +75,7 @@ def runCamera(camera_index: int, width: int, height: int, roi: tuple | None,
             if first_frame:
                 print(f"Камера {camera_index}: {frame.shape[1]}×{frame.shape[0]} пикселей.", flush=True)
                 first_frame = False
-            annotated, result, object_mask = processFrame(frame, roi)
+            annotated, result, object_mask = processFrame(frame, roi, background)
             now = time.perf_counter()
             current_fps = 1 / max(now - last_frame_time, 0.000001)
             fps = current_fps if fps == 0 else 0.9 * fps + 0.1 * current_fps
@@ -115,11 +125,13 @@ def main() -> None:
                         help="Область конвейера в пикселях фактического кадра камеры")
     parser.add_argument("--output-dir", type=Path, default=Path(__file__).resolve().parent / "output",
                         help="Каталог снимков, сохраняемых клавишей S")
+    parser.add_argument("--background", choices=("white", "black"), default="white",
+                        help="Цвет фона: white (по умолчанию) или black")
     args = parser.parse_args()
     if args.camera < 0 or min(args.width, args.height) < 32:
         parser.error("Индекс камеры должен быть неотрицательным, размеры кадра — не менее 32×32.")
     try:
-        runCamera(args.camera, args.width, args.height, args.roi, args.output_dir)
+        runCamera(args.camera, args.width, args.height, args.roi, args.output_dir, args.background)
     except KeyboardInterrupt:
         print("\nКамера остановлена.")
     except (RuntimeError, ValueError, cv2.error) as error:

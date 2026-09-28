@@ -304,7 +304,7 @@ class Hardware:
         Использовать датчик или откалиброванную выдержку; предусмотреть таймаут.
         """
         # FIXME
-        time.sleep(2)
+        time.sleep(1)
         return
         raise NotImplementedError("Ожидание выгрузки объекта пока не реализовано")
 
