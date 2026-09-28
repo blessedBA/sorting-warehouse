@@ -24,6 +24,15 @@
 #define RELAY_OFF LOW
 
 // =============================
+// Настройки программного ШИМ для реле конвейера
+// =============================
+// Период ШИМ (мс)
+unsigned long CONVEYOR_PERIOD_MS = 300;
+// Скважность в процентах (0..100): сколько времени внутри периода
+// реле должно быть включено (HIGH).
+int CONVEYOR_DUTY_PERCENT = 1;
+
+// =============================
 // Настройки движения
 // =============================
 // Временно! Нужно откалибровать под вашу механику
@@ -52,6 +61,9 @@ bool movementInProgress = false;
 // Состояние конвейера
 bool conveyorState = false;
 
+// Переменные для программного ШИМ реле
+unsigned long conveyorCycleStart = 0;
+
 #include <Servo.h>
 Servo myServo;
 
@@ -60,7 +72,38 @@ Servo myServo;
 // =============================
 void setConveyor(bool on) {
   conveyorState = on;
-  digitalWrite(RELAY_PIN, on ? RELAY_ON : RELAY_OFF);
+  if (on) {
+    // Стартуем цикл ШИМ с текущего момента
+    conveyorCycleStart = millis();
+  } else {
+    // При выключении гарантированно снимаем сигнал
+    digitalWrite(RELAY_PIN, RELAY_OFF);
+  }
+}
+
+// =============================
+// Обновление программного ШИМ реле
+// =============================
+void updateConveyor() {
+  if (!conveyorState) return;
+
+  unsigned long now = millis();
+  unsigned long elapsed = now - conveyorCycleStart;
+
+  // Перезапуск цикла, если период истёк
+  if (elapsed >= CONVEYOR_PERIOD_MS) {
+    conveyorCycleStart += CONVEYOR_PERIOD_MS;
+    elapsed = now - conveyorCycleStart;
+  }
+
+  // Время, в течение которого реле должно быть включено
+  unsigned long onTime = (CONVEYOR_PERIOD_MS * (unsigned long)CONVEYOR_DUTY_PERCENT) / 100;
+
+  if (elapsed < onTime) {
+    digitalWrite(RELAY_PIN, RELAY_ON);
+  } else {
+    digitalWrite(RELAY_PIN, RELAY_OFF);
+  }
 }
 
 // =============================
@@ -306,5 +349,6 @@ void loop() {
 
   updateX();
   updateY();
+  updateConveyor();
   checkMovementFinished();
 }

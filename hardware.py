@@ -292,7 +292,9 @@ class Hardware:
         контроль завершения и таймаут; одной установки скорости недостаточно.
         """
         # FIXME
-        time.sleep(1)
+        self.conveyor_on()
+        time.sleep(0.3)
+        self.conveyor_off()
         return
         raise NotImplementedError("Подача ровно одного объекта пока не реализована")
 
