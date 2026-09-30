@@ -12,35 +12,22 @@
 
 #define SERVO_PIN 5
 
-// Реле конвейера
-#define RELAY_PIN 6
-
-// Уровни реле:
-// Если модуль реле активен HIGH — оставьте так.
-// Если активен LOW — поменяйте местами:
-// #define RELAY_ON  LOW
-// #define RELAY_OFF HIGH
-#define RELAY_ON  HIGH
-#define RELAY_OFF LOW
+// Драйвер конвейера L298N mini
+#define CONVEYOR_PWM_PIN 6   // ENA (ШИМ)
+#define CONVEYOR_DIR_PIN 7   // IN1 (направление)
 
 // =============================
-// Настройки программного ШИМ для реле конвейера
+// Настройки скорости конвейера
 // =============================
-// Период ШИМ (мс)
-unsigned long CONVEYOR_PERIOD_MS = 300;
-// Скважность в процентах (0..100): сколько времени внутри периода
-// реле должно быть включено (HIGH).
-int CONVEYOR_DUTY_PERCENT = 1;
+// Скважность в процентах (0..100)
+int CONVEYOR_DUTY_PERCENT = 70;  // при необходимости увеличьте
 
 // =============================
 // Настройки движения
 // =============================
-// Временно! Нужно откалибровать под вашу механику
 const float X_STEPS_PER_MM = 80.0;
 const float Y_STEPS_PER_MM = 80.0;
-// Интервал между шагами
 const unsigned long STEP_INTERVAL_US = 1000;
-// Длительность STEP-импульса
 const unsigned long STEP_PULSE_US = 5;
 
 // =============================
@@ -51,18 +38,11 @@ long positionY = 0;
 long targetX = 0;
 long targetY = 0;
 
-// Время последнего шага
 unsigned long lastStepX = 0;
 unsigned long lastStepY = 0;
 
-// Флаг выполнения движения
 bool movementInProgress = false;
-
-// Состояние конвейера
 bool conveyorState = false;
-
-// Переменные для программного ШИМ реле
-unsigned long conveyorCycleStart = 0;
 
 #include <Servo.h>
 Servo myServo;
@@ -73,36 +53,15 @@ Servo myServo;
 void setConveyor(bool on) {
   conveyorState = on;
   if (on) {
-    // Стартуем цикл ШИМ с текущего момента
-    conveyorCycleStart = millis();
+    // Включаем направление (IN1 = HIGH, IN2 = GND)
+    digitalWrite(CONVEYOR_DIR_PIN, HIGH);
+    // Преобразуем проценты в 0..255
+    int pwmValue = map(CONVEYOR_DUTY_PERCENT, 0, 100, 0, 255);
+    analogWrite(CONVEYOR_PWM_PIN, pwmValue);
   } else {
-    // При выключении гарантированно снимаем сигнал
-    digitalWrite(RELAY_PIN, RELAY_OFF);
-  }
-}
-
-// =============================
-// Обновление программного ШИМ реле
-// =============================
-void updateConveyor() {
-  if (!conveyorState) return;
-
-  unsigned long now = millis();
-  unsigned long elapsed = now - conveyorCycleStart;
-
-  // Перезапуск цикла, если период истёк
-  if (elapsed >= CONVEYOR_PERIOD_MS) {
-    conveyorCycleStart += CONVEYOR_PERIOD_MS;
-    elapsed = now - conveyorCycleStart;
-  }
-
-  // Время, в течение которого реле должно быть включено
-  unsigned long onTime = (CONVEYOR_PERIOD_MS * (unsigned long)CONVEYOR_DUTY_PERCENT) / 100;
-
-  if (elapsed < onTime) {
-    digitalWrite(RELAY_PIN, RELAY_ON);
-  } else {
-    digitalWrite(RELAY_PIN, RELAY_OFF);
+    // Полностью останавливаем
+    analogWrite(CONVEYOR_PWM_PIN, 0);
+    digitalWrite(CONVEYOR_DIR_PIN, LOW);
   }
 }
 
@@ -117,7 +76,8 @@ void setup() {
   pinMode(Y_DIR_PIN, OUTPUT);
   pinMode(Y_EN_PIN, OUTPUT);
 
-  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(CONVEYOR_PWM_PIN, OUTPUT);
+  pinMode(CONVEYOR_DIR_PIN, OUTPUT);
   setConveyor(false);
 
   // A4988 активируется LOW
@@ -130,7 +90,7 @@ void setup() {
   Serial.begin(115200);
 
   myServo.attach(SERVO_PIN);
-  myServo.write(90); // Начальное положение 90 градусов
+  myServo.write(90);
 
   Serial.println("READY");
 }
@@ -203,9 +163,6 @@ void processCommand(String command) {
   command.trim();
   if (command.length() == 0) return;
 
-  // =============================
-  // GOTO X Y
-  // =============================
   if (command.startsWith("GOTO")) {
     String args = command.substring(4);
     args.trim();
@@ -225,9 +182,6 @@ void processCommand(String command) {
     movementInProgress = true;
     Serial.println("OK");
   }
-  // =============================
-  // MOVE X/Y
-  // =============================
   else if (command.startsWith("MOVE")) {
     String args = command.substring(4);
     args.trim();
@@ -249,9 +203,6 @@ void processCommand(String command) {
     movementInProgress = true;
     Serial.println("OK");
   }
-  // =============================
-  // SERVO <angle>
-  // =============================
   else if (command.startsWith("SERVO")) {
     String args = command.substring(5);
     args.trim();
@@ -266,19 +217,15 @@ void processCommand(String command) {
     Serial.print("SERVO ");
     Serial.println(angle);
   }
-  // =============================
-  // CONVEYOR ON / CONVEYOR OFF / CONVEYOR?
-  // Также поддерживаются: CONV ON/OFF/?, RELAY ON/OFF/?
-  // =============================
   else if (command.startsWith("CONVEYOR") || command.startsWith("CONV") || command.startsWith("RELAY")) {
     String args;
 
     if (command.startsWith("CONVEYOR")) {
-      args = command.substring(8);   // "CONVEYOR" = 8 символов
+      args = command.substring(8);
     } else if (command.startsWith("CONV")) {
-      args = command.substring(4);   // "CONV" = 4 символа
+      args = command.substring(4);
     } else {
-      args = command.substring(5);   // "RELAY" = 5 символов
+      args = command.substring(5);
     }
 
     args.trim();
@@ -297,9 +244,6 @@ void processCommand(String command) {
       Serial.println("ERROR");
     }
   }
-  // =============================
-  // ZERO
-  // =============================
   else if (command == "ZERO") {
     positionX = 0;
     positionY = 0;
@@ -308,27 +252,18 @@ void processCommand(String command) {
     movementInProgress = false;
     Serial.println("ZEROED");
   }
-  // =============================
-  // POS?
-  // =============================
   else if (command == "POS?") {
     Serial.print("POS ");
     Serial.print(positionX / X_STEPS_PER_MM, 2);
     Serial.print(" ");
     Serial.println(positionY / Y_STEPS_PER_MM, 2);
   }
-  // =============================
-  // STOP
-  // =============================
   else if (command == "STOP") {
     targetX = positionX;
     targetY = positionY;
     movementInProgress = false;
     Serial.println("STOPPED");
   }
-  // =============================
-  // Непрерывное движение
-  // =============================
   else if (command == "X+") { targetX = positionX + 1000000L; movementInProgress = true; Serial.println("OK"); }
   else if (command == "X-") { targetX = positionX - 1000000L; movementInProgress = true; Serial.println("OK"); }
   else if (command == "Y+") { targetY = positionY + 1000000L; movementInProgress = true; Serial.println("OK"); }
@@ -349,6 +284,5 @@ void loop() {
 
   updateX();
   updateY();
-  updateConveyor();
   checkMovementFinished();
 }
