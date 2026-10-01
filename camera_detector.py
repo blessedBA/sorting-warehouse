@@ -28,9 +28,12 @@ def drawStatus(frame: np.ndarray, status: str, fps: float) -> None:
 
 
 def runCamera(camera_index: int, width: int, height: int, roi: tuple | None,
-              output_dir: Path, background: str = "white") -> None:
+              output_dir: Path, background: str = "white", *, min_area_fraction: float = 0.002,
+              min_width: int = 8, min_height: int = 8, confirmation_frames: int = 3) -> None:
     window_name = "Warehouse - live color"
-    camera = Camera(camera_index, width, height, roi, background)
+    camera = Camera(camera_index, width, height, roi, background,
+                    min_area_fraction=min_area_fraction, min_width=min_width,
+                    min_height=min_height, confirmation_frames=confirmation_frames)
     window_created = False
     run_dir = None
     snapshot_number = 0
@@ -48,16 +51,18 @@ def runCamera(camera_index: int, width: int, height: int, roi: tuple | None,
             frame = camera.getFrame()
             if first_frame:
                 print(f"Камера {camera_index}: {frame.shape[1]}×{frame.shape[0]} пикселей.", flush=True)
+                print(f"Область распознавания (X Y WIDTH HEIGHT): {camera.getRoi(frame)}.", flush=True)
                 first_frame = False
             annotated, result, object_mask = camera.processFrame(frame)
             now = time.perf_counter()
             current_fps = 1 / max(now - last_frame_time, 0.000001)
             fps = current_fps if fps == 0 else 0.9 * fps + 0.1 * current_fps
             last_frame_time = now
-            if roi is not None:
-                x, y, roi_width, roi_height = roi
-                cv2.rectangle(annotated, (x, y), (x + roi_width - 1, y + roi_height - 1), (0, 200, 255), 1)
+            x, y, roi_width, roi_height = camera.getRoi(frame)
+            cv2.rectangle(annotated, (x, y), (x + roi_width - 1, y + roi_height - 1), (0, 0, 255), 2)
             status = "No object - place an object fully inside the frame / ROI"
+            if camera.confirmation_count and result is None:
+                status = f"Confirming object: {camera.confirmation_count}/{camera.confirmation_frames}"
             if result is not None:
                 status = f"Color: {result['color']} | Share: {result['dominant_share']:.0%}"
                 if result["ambiguous"]:
@@ -96,16 +101,26 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=960, help="Запрашиваемая ширина кадра (по умолчанию 960)")
     parser.add_argument("--height", type=int, default=540, help="Запрашиваемая высота кадра (по умолчанию 540)")
     parser.add_argument("--roi", type=int, nargs=4, metavar=("X", "Y", "WIDTH", "HEIGHT"),
-                        help="Область конвейера в пикселях фактического кадра камеры")
+                        help="Заменить область по умолчанию: X Y WIDTH HEIGHT в пикселях фактического кадра")
     parser.add_argument("--output-dir", type=Path, default=Path(__file__).resolve().parent / "output",
                         help="Каталог снимков, сохраняемых клавишей S")
     parser.add_argument("--background", choices=("white", "black"), default="white",
                         help="Цвет фона: white (по умолчанию) или black")
+    parser.add_argument("--min-area-fraction", type=float, default=0.002,
+                        help="Минимальная площадь предмета в долях ROI (по умолчанию 0.002 = 0.2%%)")
+    parser.add_argument("--min-width", type=int, default=8,
+                        help="Минимальная ширина предмета в пикселях (по умолчанию 8)")
+    parser.add_argument("--min-height", type=int, default=8,
+                        help="Минимальная высота предмета в пикселях (по умолчанию 8)")
+    parser.add_argument("--confirmation-frames", type=int, default=3,
+                        help="Последовательных кадров для подтверждения (по умолчанию 3; 1 — сразу)")
     args = parser.parse_args()
     if args.camera < 0 or min(args.width, args.height) < 32:
         parser.error("Индекс камеры должен быть неотрицательным, размеры кадра — не менее 32×32.")
     try:
-        runCamera(args.camera, args.width, args.height, args.roi, args.output_dir, args.background)
+        runCamera(args.camera, args.width, args.height, args.roi, args.output_dir, args.background,
+                  min_area_fraction=args.min_area_fraction, min_width=args.min_width,
+                  min_height=args.min_height, confirmation_frames=args.confirmation_frames)
     except KeyboardInterrupt:
         print("\nКамера остановлена.")
     except (RuntimeError, ValueError, cv2.error) as error:

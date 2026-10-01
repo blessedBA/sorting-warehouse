@@ -5,7 +5,7 @@ import serial
 from hardware import Hardware
 
 
-COM_PORT = "/dev/ttyUSB0"
+COM_PORT = "/dev/cu.usbserial-3120"
 BAUDRATE = 115200
 
 

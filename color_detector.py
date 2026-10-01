@@ -51,9 +51,19 @@ def foregroundMask(image: np.ndarray, brightness_threshold: float,
     return (value > brightness_threshold) | colorful
 
 
+def validateSizeLimits(min_area_fraction: float, min_width: int, min_height: int) -> None:
+    if not 0 <= min_area_fraction <= 1:
+        raise ValueError("Минимальная доля площади должна быть от 0 до 1.")
+    if any(not isinstance(size, int) or isinstance(size, bool) or size < 1
+           for size in (min_width, min_height)):
+        raise ValueError("Минимальные ширина и высота должны быть целыми положительными числами.")
+
+
 def segmentObject(image: np.ndarray, roi: tuple | None = None,
-                  background: str = "white") -> np.ndarray:
+                  background: str = "white", *, min_area_fraction: float = 0.00005,
+                  min_width: int = 1, min_height: int = 1) -> np.ndarray:
     """Выделить предмет на фоне (белом или чёрном) внутри ROI."""
+    validateSizeLimits(min_area_fraction, min_width, min_height)
     height, width = image.shape[:2]
     if min(height, width) < 32:
         raise ValueError("Изображение должно быть размером не менее 32×32 пикселей.")
@@ -81,9 +91,12 @@ def segmentObject(image: np.ndarray, roi: tuple | None = None,
     count, labels, stats, _ = cv2.connectedComponentsWithStats(foreground, connectivity=8)
     # Области, выходящие за край кадра/ROI, не считаются предметами.
     border_labels = np.unique(np.concatenate((labels[0], labels[-1], labels[:, 0], labels[:, -1])))
-    min_area = max(25, roi_width * roi_height * 0.00005)
+    min_area = max(25, roi_width * roi_height * min_area_fraction)
     candidates = [label for label in range(1, count)
-                  if label not in border_labels and stats[label, cv2.CC_STAT_AREA] >= min_area]
+                  if label not in border_labels
+                  and stats[label, cv2.CC_STAT_AREA] >= min_area
+                  and stats[label, cv2.CC_STAT_WIDTH] >= min_width
+                  and stats[label, cv2.CC_STAT_HEIGHT] >= min_height]
     if not candidates:
         raise ObjectNotFound("Объект не найден. Поместите предмет целиком внутри кадра/ROI; "
                              "проверьте освещение и контраст с фоном.")
@@ -93,7 +106,9 @@ def segmentObject(image: np.ndarray, roi: tuple | None = None,
     original_foreground = foregroundMask(crop, brightness_threshold, background)
     object_mask = np.zeros((height, width), dtype=np.uint8)
     object_mask[y:y + roi_height, x:x + roi_width] = (selected & original_foreground).astype(np.uint8) * 255
-    if np.count_nonzero(object_mask) < 25:
+    _, _, object_width, object_height = cv2.boundingRect(object_mask)
+    if (np.count_nonzero(object_mask) < min_area
+            or object_width < min_width or object_height < min_height):
         raise ObjectNotFound("После исключения фона объект слишком мал для определения цвета.")
     return object_mask
 
@@ -119,9 +134,11 @@ def classifyPixels(pixels: np.ndarray) -> np.ndarray:
 
 
 def detectColor(image: np.ndarray, roi: tuple | None = None,
-                background: str = "white") -> tuple[dict, np.ndarray]:
+                background: str = "white", *, min_area_fraction: float = 0.00005,
+                min_width: int = 1, min_height: int = 1) -> tuple[dict, np.ndarray]:
     """Вернуть описание цвета и маску; можно вызывать для кадров камеры."""
-    object_mask = segmentObject(image, roi, background)
+    object_mask = segmentObject(image, roi, background, min_area_fraction=min_area_fraction,
+                                min_width=min_width, min_height=min_height)
     # Отступ от контура уменьшает влияние фона и сглаженных краёв.
     kernel_size = max(3, round(min(image.shape[:2]) * 0.005) | 1)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))

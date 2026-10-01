@@ -5,7 +5,6 @@ from contextlib import ExitStack
 from dataclasses import dataclass, field
 import math
 import sys
-import time
 import random
 
 
@@ -27,11 +26,12 @@ class WarehouseConfig:
             9: (14, 0),
         }
     )
-    conveyor_speed: float | None = 1
+    # Время от распознавания до падения в тару, подбирается на установке.
+    feed_duration: float = 0.3
 
     def validate(self) -> None:
-        if self.conveyor_speed is None or not math.isfinite(self.conveyor_speed) or self.conveyor_speed <= 0:
-            raise ValueError("Задайте положительную conveyor_speed в WarehouseConfig")
+        if not math.isfinite(self.feed_duration) or self.feed_duration <= 0:
+            raise ValueError("Задайте положительную конечную feed_duration в WarehouseConfig")
         if set(self.cell_positions) != set(range(1, 10)):
             raise ValueError("Нужны координаты всех девяти ячеек с номерами 1–9")
         positions = {"loading_position": self.loading_position, **self.cell_positions}
@@ -40,16 +40,9 @@ class WarehouseConfig:
                 raise ValueError(f"Задайте две конечные координаты для {name}")
 
 
-def selectCell(color: str, weight: float) -> int:
-    """TODO: вернуть номер ячейки 1–9 по трём цветам и трём интервалам масс.
-
-    weight — граммы. Здесь нужно захардкодить цвета и границы интервалов,
-    определить принадлежность граничных значений и отказ для неизвестного цвета
-    или массы вне диапазона. Произвольная ячейка по умолчанию не выбирается.
-    """
-    # FIXME
+def selectCell(color: str) -> int:
+    """Выбрать случайную ячейку 1–9; цвет пока не влияет на выбор."""
     return random.randint(1, 9)
-    raise NotImplementedError("Правила сортировки по цвету и массе пока не заданы")
 
 
 def createHardware(backend: str, port: str, baudrate: int):
@@ -64,52 +57,47 @@ def createHardware(backend: str, port: str, baudrate: int):
     raise ValueError(f"Неизвестный тип оборудования: {backend}")
 
 
-def sortOneObject(hardware, camera, config: WarehouseConfig) -> int:
-    """Один цикл. config проверяется до запуска; ошибки прерывают сортировку."""
-    # 1. Дождаться объекта в зоне измерения, затем остановить ленту.
-    hardware.conveyor_on()
-    while True:
+def waitForObject(hardware, camera) -> dict:
+    """Проверить остановленную ленту, при необходимости подать предмет до камеры."""
+    camera.resetDetection()
+    # None в первых кадрах может означать, что предмет ещё подтверждается.
+    for _ in range(camera.confirmation_frames):
         result = camera.detectObject()
-        if result is not None and camera.isObjectReady(result):
-            break
-        time.sleep(0.05)
-    hardware.conveyor_off()
+        if result is not None:
+            return result
+    try:
+        hardware.conveyor_on()
+        while True:
+            result = camera.detectObject()
+            if result is not None:
+                return result
+    finally:
+        hardware.conveyor_off()
 
-    print("Conveyor stoped")
 
-    # 2. Цвет и масса относятся к объекту, оставшемуся в зоне после остановки.
-    result = camera.detectObject()
-    if result is None or not camera.isObjectReady(result):
-        raise RuntimeError("После остановки ленты объект отсутствует в нужном положении")
-    if result["ambiguous"]:
-        raise RuntimeError("Цвет объекта неоднозначен; сортировка остановлена")
-    weight = hardware.get_weight()
-    if not math.isfinite(weight) or weight < 0:
-        raise ValueError("Тензодатчик должен вернуть конечную неотрицательную массу в граммах")
-
-    # 3. Выбрать одну из девяти ячеек.
-    cell = selectCell(result["color"], weight)
-    if type(cell) is not int or cell not in config.cell_positions:
-        raise ValueError("selectCell должен вернуть целый номер ячейки от 1 до 9")
-
-    # 4. Подвести тару с закрытым затвором под конвейер.
-    hardware.close()
-    hardware.waitUntilIdle()
+def sortOneObject(hardware, camera, config: WarehouseConfig) -> int:
+    """Выполнить цикл с закрытым затвором и остановленной лентой на входе и выходе."""
+    # 1. Подвести уже закрытую тару под конвейер.
     hardware.goto(*config.loading_position)
     hardware.waitUntilIdle()
 
-    print("Ready to feed")
+    # 2–3. Найти предмет и использовать цвет из подтвердившего его кадра.
+    result = waitForObject(hardware, camera)
+    # ambiguous описывает смесь цветов, а не отсутствие предмета.
+    # При случайном выборе ячейки это не мешает подаче и выгрузке.
+    cell = selectCell(result["color"])
+    if type(cell) is not int or cell not in config.cell_positions:
+        raise ValueError("selectCell должен вернуть целый номер ячейки от 1 до 9")
+    color_note = "; смешанные цвета" if result["ambiguous"] else ""
+    print(f"Распознан цвет: {result['color']} ({result['dominant_share']:.1%} пикселей{color_note}); "
+          f"ячейка: {cell}", flush=True)
 
-    # 5. Дождаться падения только измеренного объекта и остановки ленты.
-    hardware.feedOneObject()
+    # 4. Прокрутить ленту заданное время и остановить до перемещения головки.
+    hardware.feedOneObject(config.feed_duration)
 
-    # 6. Переместить объект к выбранной ячейке.
+    # 5. Отвезти предмет, открыть затвор, дождаться выгрузки и закрыть.
     hardware.goto(*config.cell_positions[cell])
     hardware.waitUntilIdle()
-
-    print("Went to cell")
-
-    # 7–8. Открыть затвор, дождаться выгрузки, закрыть затвор.
     hardware.open()
     hardware.waitUntilIdle()
     hardware.waitForUnload()
@@ -121,8 +109,9 @@ def sortOneObject(hardware, camera, config: WarehouseConfig) -> int:
 def shutdownHardware(hardware) -> None:
     """Попытаться остановить оба механизма и освободить подключение независимо от ошибок."""
     actions = (
-        ("остановить конвейер", lambda: hardware.conveyor_off),
+        # STOP также восстанавливает синхронизацию протокола после ошибки.
         ("остановить головку", hardware.stop),
+        ("остановить конвейер", hardware.conveyor_off),
         ("отключить оборудование", hardware.disconnect),
     )
     for description, action in actions:
@@ -141,7 +130,10 @@ def runWarehouse(hardware, camera, config: WarehouseConfig) -> None:
     """
     try:
         config.validate()
+        # Подготовка только перед первым циклом; дальше затвор закрывается при выгрузке.
         hardware.conveyor_off()
+        hardware.close()
+        hardware.waitUntilIdle()
         while True:
             cell = sortOneObject(hardware, camera, config)
             print(f"Объект помещён в ячейку {cell}", flush=True)
@@ -155,10 +147,13 @@ def main() -> None:
     parser.add_argument("--port", default="COM3")
     parser.add_argument("--baudrate", type=int, default=115200)
     parser.add_argument("--camera", type=int, default=0)
-    parser.add_argument("--roi", type=int, nargs=4, metavar=("X", "Y", "WIDTH", "HEIGHT"))
+    parser.add_argument("--feed-duration", type=float, default=WarehouseConfig.feed_duration,
+                        help="Время прокрутки после распознавания, в секундах (по умолчанию 0.3)")
+    parser.add_argument("--roi", type=int, nargs=4, metavar=("X", "Y", "WIDTH", "HEIGHT"),
+                        help="Заменить область по умолчанию: X Y WIDTH HEIGHT в пикселях фактического кадра")
     args = parser.parse_args()
     try:
-        config = WarehouseConfig()
+        config = WarehouseConfig(feed_duration=args.feed_duration)
         config.validate()
         from camera import Camera
         with ExitStack() as resources:

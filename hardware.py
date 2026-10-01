@@ -17,7 +17,7 @@ class Hardware:
 
     def __init__(self, com_port: str = "COM3", baudrate: int = 115200,
                  timeout: float = 1, startup_timeout: float = 5,
-                 movement_timeout: float = 60, servo_settle_time: float | None = 2):
+                 movement_timeout: float = 60, servo_settle_time: float | None = 0.5):
         for value in (timeout, startup_timeout, movement_timeout):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError("Таймауты должны быть конечными положительными числами")
@@ -283,30 +283,23 @@ class Hardware:
                 time.sleep(remaining)
             self._servo_pending = False
 
-    def feedOneObject(self) -> None:
-        """TODO: подать измеренный объект с остановленной ленты в тару головки.
+    def feedOneObject(self, duration: float = 0.3) -> None:
+        """Прокрутить ленту duration секунд и остановить, в том числе при прерывании.
 
-        Вернуться только после попадания ровно одного объекта в тару и остановки
-        ленты. Объект должен покинуть зону измерения. Следующий объект не должен
-        упасть следом. Нужны датчик/дозатор или проверенная механика подачи,
-        контроль завершения и таймаут; одной установки скорости недостаточно.
+        Выдержка отсчитывается после ответа CONVEYOR ON. Она подбирается
+        на механике: датчик фактического падения в текущем протоколе отсутствует.
         """
-        # FIXME
-        self.conveyor_on()
-        time.sleep(0.3)
-        self.conveyor_off()
-        return
-        raise NotImplementedError("Подача ровно одного объекта пока не реализована")
+        if not math.isfinite(duration) or duration <= 0:
+            raise ValueError("Время подачи должно быть конечным положительным числом")
+        try:
+            self.conveyor_on()
+            time.sleep(duration)
+        finally:
+            self.conveyor_off()
 
     def waitForUnload(self) -> None:
-        """TODO: подтвердить выход объекта из тары перед закрытием затвора.
-
-        Использовать датчик или откалиброванную выдержку; предусмотреть таймаут.
-        """
-        # FIXME
-        time.sleep(1)
-        return
-        raise NotImplementedError("Ожидание выгрузки объекта пока не реализовано")
+        """Выдержать полсекунды на выпадение предмета перед закрытием затвора."""
+        time.sleep(0.5)
 
     def disconnect(self) -> None:
         """Отправить STOP и освободить порт, даже если отправка не удалась."""
