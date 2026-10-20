@@ -16,6 +16,9 @@
 #define CONVEYOR_PWM_PIN 6   // ENA (ШИМ)
 #define CONVEYOR_DIR_PIN 7   // IN1 (направление)
 
+#define HX711_DATA_PIN A5   // DT / DOUT
+#define HX711_CLOCK_PIN A4  // SCK / CLK
+
 // =============================
 // Настройки скорости конвейера
 // =============================
@@ -33,31 +36,144 @@ const unsigned long STEP_PULSE_US = 5;
 // =============================
 // Переменные положения
 // =============================
-long positionX = 0;
-long positionY = 0;
-long targetX = 0;
-long targetY = 0;
+long position_x = 0;
+long position_y = 0;
+long target_x = 0;
+long target_y = 0;
 
-unsigned long lastStepX = 0;
-unsigned long lastStepY = 0;
+unsigned long last_step_x = 0;
+unsigned long last_step_y = 0;
 
-bool movementInProgress = false;
-bool conveyorState = false;
+bool movement_in_progress = false;
+bool conveyor_state = false;
 
 #include <Servo.h>
-Servo myServo;
+Servo my_servo;
+
+// HX711: канал A, усиление 128. Внешняя библиотека не требуется.
+// Вес = (среднее АЦП - тара) / коэффициент в отсчётах на грамм.
+const unsigned long SCALE_TIMEOUT_MS = 4000;
+const unsigned long SCALE_SETTLE_MS = 500;
+const uint8_t SCALE_SAMPLES = 10;
+enum ScaleOperation { ScaleIdle, ScaleStartup, ScaleTare, ScaleWeight, ScaleCalibrate };
+ScaleOperation scale_operation = ScaleIdle;
+unsigned long scale_started = 0;
+long scale_sum = 0;
+uint8_t scale_samples = 0;
+bool scale_discard_first = true;
+bool scale_tared = false;
+float scale_offset = 0;
+float scale_factor = 0;  // 0: калибровка ещё не задана.
+float calibration_weight = 0;
+
+// Вызывается только после DOUT=LOW, из setup/loop, вне обработчиков прерываний.
+long readHx711() {
+  uint32_t value = 0;
+  // Прерывание Servo не должно растянуть HIGH SCK до режима power-down.
+  for (uint8_t bit = 0; bit < 24; ++bit) {
+    noInterrupts();
+    digitalWrite(HX711_CLOCK_PIN, HIGH);
+    delayMicroseconds(1);
+    value = (value << 1) | digitalRead(HX711_DATA_PIN);
+    digitalWrite(HX711_CLOCK_PIN, LOW);
+    interrupts();
+    delayMicroseconds(1);
+  }
+  // 25-й импульс выбирает канал A / gain 128 для следующего измерения.
+  noInterrupts();
+  digitalWrite(HX711_CLOCK_PIN, HIGH);
+  delayMicroseconds(1);
+  digitalWrite(HX711_CLOCK_PIN, LOW);
+  interrupts();
+  if (value & 0x800000UL) value |= 0xFF000000UL;
+  return static_cast<int32_t>(value);
+}
+
+bool validScaleFactor(float value) {
+  return isfinite(value) && fabs(value) >= 1e-6 && fabs(value) <= 1e9;
+}
+
+bool parseNumber(String text, float &value) {
+  text.trim();
+  if (text.length() == 0) return false;
+  char *end;
+  value = strtod(text.c_str(), &end);
+  return *end == '\0' && isfinite(value);
+}
+
+void startScale(ScaleOperation operation) {
+  scale_operation = operation;
+  scale_started = millis();
+  scale_sum = 0;
+  scale_samples = 0;
+  scale_discard_first = true;
+  if (operation == ScaleTare || operation == ScaleStartup) scale_tared = false;
+}
+
+void failScale(const __FlashStringHelper *message) {
+  scale_operation = ScaleIdle;
+  Serial.println(message);
+}
+
+void updateScale() {
+  if (scale_operation == ScaleIdle) return;
+  unsigned long elapsed = millis() - scale_started;
+  if (elapsed >= SCALE_TIMEOUT_MS) {
+    failScale(F("ERROR HX711_TIMEOUT"));
+    return;
+  }
+  if (digitalRead(HX711_DATA_PIN) != LOW) return;
+  long sample = readHx711();
+  // Удаляем старый отсчёт, затем непрерывно читаем во время успокоения.
+  if (scale_discard_first || elapsed < SCALE_SETTLE_MS) {
+    scale_discard_first = false;
+    return;
+  }
+  if (sample == -8388608L || sample == 8388607L) {
+    failScale(F("ERROR HX711_OVERLOAD"));
+    return;
+  }
+  scale_sum += sample;  // 10 * 24 бита укладываются в signed long.
+  if (++scale_samples < SCALE_SAMPLES) return;
+
+  float average = static_cast<float>(scale_sum) / SCALE_SAMPLES;
+  ScaleOperation completed = scale_operation;
+  scale_operation = ScaleIdle;
+  if (completed == ScaleStartup || completed == ScaleTare) {
+    scale_offset = average;
+    scale_tared = true;
+    Serial.println(completed == ScaleStartup ? F("READY") : F("TARED"));
+  } else if (completed == ScaleCalibrate) {
+    float factor = (average - scale_offset) / calibration_weight;
+    if (!validScaleFactor(factor)) {
+      Serial.println(F("ERROR HX711_CALIBRATION"));
+      return;
+    }
+    scale_factor = factor;
+    Serial.print(F("SCALE "));
+    Serial.println(scale_factor, 6);
+  } else {
+    float weight = (average - scale_offset) / scale_factor;
+    if (!isfinite(weight)) {
+      Serial.println(F("ERROR HX711_WEIGHT"));
+      return;
+    }
+    Serial.print(F("WEIGHT "));
+    Serial.println(weight, 3);
+  }
+}
 
 // =============================
 // Управление конвейером
 // =============================
 void setConveyor(bool on) {
-  conveyorState = on;
+  conveyor_state = on;
   if (on) {
     // Включаем направление (IN1 = HIGH, IN2 = GND)
     digitalWrite(CONVEYOR_DIR_PIN, HIGH);
     // Преобразуем проценты в 0..255
-    int pwmValue = map(CONVEYOR_DUTY_PERCENT, 0, 100, 0, 255);
-    analogWrite(CONVEYOR_PWM_PIN, pwmValue);
+    int pwm_value = map(CONVEYOR_DUTY_PERCENT, 0, 100, 0, 255);
+    analogWrite(CONVEYOR_PWM_PIN, pwm_value);
   } else {
     // Полностью останавливаем
     analogWrite(CONVEYOR_PWM_PIN, 0);
@@ -89,10 +205,16 @@ void setup() {
 
   Serial.begin(115200);
 
-  myServo.attach(SERVO_PIN);
-  myServo.write(90);
+  my_servo.attach(SERVO_PIN);
+  my_servo.write(37);  // Закрытая пустая тара перед стартовым тарированием.
 
-  Serial.println("READY");
+  pinMode(HX711_DATA_PIN, INPUT_PULLUP);
+  pinMode(HX711_CLOCK_PIN, OUTPUT);
+  // Сброс HX711 гарантирует канал A / gain 128 после перезапуска Arduino.
+  digitalWrite(HX711_CLOCK_PIN, HIGH);
+  delayMicroseconds(80);
+  digitalWrite(HX711_CLOCK_PIN, LOW);
+  startScale(ScaleStartup);  // READY отправляется только после успешного тарирования.
 }
 
 // =============================
@@ -103,7 +225,7 @@ void makeStepX(int direction) {
   digitalWrite(X_STEP_PIN, HIGH);
   delayMicroseconds(STEP_PULSE_US);
   digitalWrite(X_STEP_PIN, LOW);
-  positionX += direction;
+  position_x += direction;
 }
 
 // =============================
@@ -114,20 +236,20 @@ void makeStepY(int direction) {
   digitalWrite(Y_STEP_PIN, HIGH);
   delayMicroseconds(STEP_PULSE_US);
   digitalWrite(Y_STEP_PIN, LOW);
-  positionY += direction;
+  position_y += direction;
 }
 
 // =============================
 // Обновление движения оси X
 // =============================
 void updateX() {
-  if (positionX == targetX) return;
+  if (position_x == target_x) return;
 
-  unsigned long currentMicros = micros();
-  if (currentMicros - lastStepX < STEP_INTERVAL_US) return;
+  unsigned long current_micros = micros();
+  if (current_micros - last_step_x < STEP_INTERVAL_US) return;
 
-  lastStepX = currentMicros;
-  if (targetX > positionX) makeStepX(1);
+  last_step_x = current_micros;
+  if (target_x > position_x) makeStepX(1);
   else makeStepX(-1);
 }
 
@@ -135,13 +257,13 @@ void updateX() {
 // Обновление движения оси Y
 // =============================
 void updateY() {
-  if (positionY == targetY) return;
+  if (position_y == target_y) return;
 
-  unsigned long currentMicros = micros();
-  if (currentMicros - lastStepY < STEP_INTERVAL_US) return;
+  unsigned long current_micros = micros();
+  if (current_micros - last_step_y < STEP_INTERVAL_US) return;
 
-  lastStepY = currentMicros;
-  if (targetY > positionY) makeStepY(1);
+  last_step_y = current_micros;
+  if (target_y > position_y) makeStepY(1);
   else makeStepY(-1);
 }
 
@@ -149,9 +271,9 @@ void updateY() {
 // Проверка окончания движения
 // =============================
 void checkMovementFinished() {
-  bool movementFinished = (positionX == targetX && positionY == targetY);
-  if (movementInProgress && movementFinished) {
-    movementInProgress = false;
+  bool movement_finished = (position_x == target_x && position_y == target_y);
+  if (movement_in_progress && movement_finished) {
+    movement_in_progress = false;
     Serial.println("DONE");
   }
 }
@@ -163,23 +285,61 @@ void processCommand(String command) {
   command.trim();
   if (command.length() == 0) return;
 
-  if (command.startsWith("GOTO")) {
+  if (scale_operation != ScaleIdle && command != "STOP" && command != "CONVEYOR OFF") {
+    Serial.println(F("ERROR HX711_BUSY"));
+    return;
+  }
+  if (command == "TARE" || command == "WEIGHT?" ||
+      command.startsWith("SCALE ") || command.startsWith("CALIBRATE ")) {
+    if (movement_in_progress || conveyor_state) {
+      Serial.println(F("ERROR HX711_MOVING"));
+      return;
+    }
+    if (command == "TARE") {
+      startScale(ScaleTare);
+    } else if (command.startsWith("SCALE ")) {
+      float factor;
+      if (!parseNumber(command.substring(6), factor) || !validScaleFactor(factor)) {
+        Serial.println(F("ERROR HX711_CALIBRATION"));
+        return;
+      }
+      scale_factor = factor;
+      Serial.print(F("SCALE "));
+      Serial.println(scale_factor, 6);
+    } else if (!scale_tared) {
+      Serial.println(F("ERROR HX711_NOT_TARED"));
+    } else if (command == "WEIGHT?") {
+      if (!validScaleFactor(scale_factor)) {
+        Serial.println(F("ERROR HX711_NOT_CALIBRATED"));
+        return;
+      }
+      startScale(ScaleWeight);
+    } else {
+      if (!parseNumber(command.substring(10), calibration_weight) ||
+          calibration_weight <= 0 || calibration_weight > 1e9) {
+        Serial.println(F("ERROR HX711_CALIBRATION"));
+        return;
+      }
+      startScale(ScaleCalibrate);
+    }
+  }
+  else if (command.startsWith("GOTO")) {
     String args = command.substring(4);
     args.trim();
     int separator = args.indexOf(' ');
     if (separator == -1) { Serial.println("ERROR"); return; }
 
-    String xString = args.substring(0, separator);
-    String yString = args.substring(separator + 1);
-    xString.trim();
-    yString.trim();
+    String x_string = args.substring(0, separator);
+    String y_string = args.substring(separator + 1);
+    x_string.trim();
+    y_string.trim();
 
-    float x = xString.toFloat();
-    float y = yString.toFloat();
+    float x = x_string.toFloat();
+    float y = y_string.toFloat();
 
-    targetX = lround(x * X_STEPS_PER_MM);
-    targetY = lround(y * Y_STEPS_PER_MM);
-    movementInProgress = true;
+    target_x = lround(x * X_STEPS_PER_MM);
+    target_y = lround(y * Y_STEPS_PER_MM);
+    movement_in_progress = true;
     Serial.println("OK");
   }
   else if (command.startsWith("MOVE")) {
@@ -188,19 +348,19 @@ void processCommand(String command) {
     if (args.length() < 2) { Serial.println("ERROR"); return; }
 
     char axis = args.charAt(0);
-    String distanceString = args.substring(1);
-    distanceString.trim();
-    float distance = distanceString.toFloat();
+    String distance_string = args.substring(1);
+    distance_string.trim();
+    float distance = distance_string.toFloat();
 
     if (axis == 'X' || axis == 'x') {
-      targetX = positionX + lround(distance * X_STEPS_PER_MM);
+      target_x = position_x + lround(distance * X_STEPS_PER_MM);
     } else if (axis == 'Y' || axis == 'y') {
-      targetY = positionY + lround(distance * Y_STEPS_PER_MM);
+      target_y = position_y + lround(distance * Y_STEPS_PER_MM);
     } else {
       Serial.println("ERROR");
       return;
     }
-    movementInProgress = true;
+    movement_in_progress = true;
     Serial.println("OK");
   }
   else if (command.startsWith("SERVO")) {
@@ -213,7 +373,7 @@ void processCommand(String command) {
     int angle = args.toInt();
     angle = constrain(angle, 0, 180);
 
-    myServo.write(angle);
+    my_servo.write(angle);
     Serial.print("SERVO ");
     Serial.println(angle);
   }
@@ -239,35 +399,36 @@ void processCommand(String command) {
       Serial.println("CONVEYOR OFF");
     } else if (args == "?" || args.length() == 0) {
       Serial.print("CONVEYOR ");
-      Serial.println(conveyorState ? "ON" : "OFF");
+      Serial.println(conveyor_state ? "ON" : "OFF");
     } else {
       Serial.println("ERROR");
     }
   }
   else if (command == "ZERO") {
-    positionX = 0;
-    positionY = 0;
-    targetX = 0;
-    targetY = 0;
-    movementInProgress = false;
+    position_x = 0;
+    position_y = 0;
+    target_x = 0;
+    target_y = 0;
+    movement_in_progress = false;
     Serial.println("ZEROED");
   }
   else if (command == "POS?") {
     Serial.print("POS ");
-    Serial.print(positionX / X_STEPS_PER_MM, 2);
+    Serial.print(position_x / X_STEPS_PER_MM, 2);
     Serial.print(" ");
-    Serial.println(positionY / Y_STEPS_PER_MM, 2);
+    Serial.println(position_y / Y_STEPS_PER_MM, 2);
   }
   else if (command == "STOP") {
-    targetX = positionX;
-    targetY = positionY;
-    movementInProgress = false;
+    scale_operation = ScaleIdle;  // Отменить измерение: после STOPPED запоздалого WEIGHT нет.
+    target_x = position_x;
+    target_y = position_y;
+    movement_in_progress = false;
     Serial.println("STOPPED");
   }
-  else if (command == "X+") { targetX = positionX + 1000000L; movementInProgress = true; Serial.println("OK"); }
-  else if (command == "X-") { targetX = positionX - 1000000L; movementInProgress = true; Serial.println("OK"); }
-  else if (command == "Y+") { targetY = positionY + 1000000L; movementInProgress = true; Serial.println("OK"); }
-  else if (command == "Y-") { targetY = positionY - 1000000L; movementInProgress = true; Serial.println("OK"); }
+  else if (command == "X+") { target_x = position_x + 1000000L; movement_in_progress = true; Serial.println("OK"); }
+  else if (command == "X-") { target_x = position_x - 1000000L; movement_in_progress = true; Serial.println("OK"); }
+  else if (command == "Y+") { target_y = position_y + 1000000L; movement_in_progress = true; Serial.println("OK"); }
+  else if (command == "Y-") { target_y = position_y - 1000000L; movement_in_progress = true; Serial.println("OK"); }
   else {
     Serial.println("UNKNOWN");
   }
@@ -277,12 +438,24 @@ void processCommand(String command) {
 // Основной цикл
 // =============================
 void loop() {
-  if (Serial.available() > 0) {
-    String command = Serial.readStringUntil('\n');
-    processCommand(command);
+  // Частичная строка не блокирует движение и опрос HX711.
+  static String command;
+  static bool command_overflow = false;
+  while (Serial.available() > 0) {
+    char symbol = Serial.read();
+    if (symbol == '\n') {
+      if (command_overflow) Serial.println("ERROR");
+      else processCommand(command);
+      command = "";
+      command_overflow = false;
+    } else if (symbol != '\r') {
+      if (command.length() < 80) command += symbol;
+      else command_overflow = true;
+    }
   }
 
   updateX();
   updateY();
   checkMovementFinished();
+  updateScale();
 }

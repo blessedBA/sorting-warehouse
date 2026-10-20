@@ -1,11 +1,12 @@
 """Автоматический цикл склада. Протокол платы изолирован в драйвере оборудования."""
 
 import argparse
+from bisect import bisect_right
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 import math
-import sys
 import random
+import sys
 
 
 @dataclass
@@ -28,8 +29,14 @@ class WarehouseConfig:
     )
     # Время от распознавания до падения в тару, подбирается на установке.
     feed_duration: float = 0.3
+    # Границы трёх рядов: <5 г, [5; 12) г, >=12 г.
+    weight_limits: tuple[float, float] = (5.0, 12.0)
+    min_weight: float = 0.0
 
     def validate(self) -> None:
+        validateWeightLimits(self.weight_limits)
+        if not math.isfinite(self.min_weight) or not 0 <= self.min_weight < self.weight_limits[0]:
+            raise ValueError("min_weight должен быть неотрицательным и меньше первой границы веса")
         if not math.isfinite(self.feed_duration) or self.feed_duration <= 0:
             raise ValueError("Задайте положительную конечную feed_duration в WarehouseConfig")
         if set(self.cell_positions) != set(range(1, 10)):
@@ -40,16 +47,34 @@ class WarehouseConfig:
                 raise ValueError(f"Задайте две конечные координаты для {name}")
 
 
-def selectCell(color: str) -> int:
-    """Выбрать случайную ячейку 1–9; цвет пока не влияет на выбор."""
-    return random.randint(1, 9)
+def validateWeightLimits(weight_limits: tuple[float, ...]) -> None:
+    if len(weight_limits) != 2 or any(not math.isfinite(value) or value <= 0 for value in weight_limits):
+        raise ValueError("Задайте две положительные конечные границы веса для трёх рядов")
+    if any(left >= right for left, right in zip(weight_limits, weight_limits[1:])):
+        raise ValueError("Границы веса должны строго возрастать")
 
 
-def createHardware(backend: str, port: str, baudrate: int):
+def selectCell(weight: float, weight_limits: tuple[float, ...] = WarehouseConfig.weight_limits) -> int:
+    """Выбрать случайную ячейку весового ряда; граница относится к следующему ряду."""
+    validateWeightLimits(weight_limits)
+    if not math.isfinite(weight) or weight <= 0:
+        raise ValueError("Масса предмета должна быть положительной и конечной")
+    first_cell = bisect_right(weight_limits, weight) * 3 + 1
+    return random.randint(first_cell, first_cell + 2)
+
+
+def createHardware(backend: str, port: str, baudrate: int, weight_scale: float | None = None):
     """Единственная точка выбора платы; цикл использует общий набор методов."""
     if backend == "arduino":
         from hardware import Hardware
-        return Hardware(com_port=port, baudrate=baudrate)
+        hardware = Hardware(com_port=port, baudrate=baudrate)
+        try:
+            if weight_scale is not None:
+                hardware.setWeightScale(weight_scale)
+        except BaseException:
+            shutdownHardware(hardware)
+            raise
+        return hardware
     if backend == "raspberry-pi":
         # TODO: вернуть драйвер Raspberry Pi с теми же методами, что у Hardware.
         # GPIO или связь с отдельной платой реализуются в этом драйвере.
@@ -84,16 +109,19 @@ def sortOneObject(hardware, camera, config: WarehouseConfig) -> int:
     # 2–3. Найти предмет и использовать цвет из подтвердившего его кадра.
     result = waitForObject(hardware, camera)
     # ambiguous описывает смесь цветов, а не отсутствие предмета.
-    # При случайном выборе ячейки это не мешает подаче и выгрузке.
-    cell = selectCell(result["color"])
+    color_note = "; смешанные цвета" if result["ambiguous"] else ""
+    print(f"Распознан цвет: {result['color']} ({result['dominant_share']:.1%} пикселей{color_note})",
+          flush=True)
+
+    # 4. Подать предмет в тару, остановить ленту, взвесить и выбрать ячейку.
+    hardware.feedOneObject(config.feed_duration)
+    weight = hardware.get_weight()
+    if not math.isfinite(weight) or weight <= 0 or weight < config.min_weight:
+        raise ValueError(f"Недопустимая масса {weight} г: минимум {config.min_weight} г")
+    cell = selectCell(weight, config.weight_limits)
     if type(cell) is not int or cell not in config.cell_positions:
         raise ValueError("selectCell должен вернуть целый номер ячейки от 1 до 9")
-    color_note = "; смешанные цвета" if result["ambiguous"] else ""
-    print(f"Распознан цвет: {result['color']} ({result['dominant_share']:.1%} пикселей{color_note}); "
-          f"ячейка: {cell}", flush=True)
-
-    # 4. Прокрутить ленту заданное время и остановить до перемещения головки.
-    hardware.feedOneObject(config.feed_duration)
+    print(f"Масса: {weight:.3f} г; ячейка: {cell}", flush=True)
 
     # 5. Отвезти предмет, открыть затвор, дождаться выгрузки и закрыть.
     hardware.goto(*config.cell_positions[cell])
@@ -149,17 +177,27 @@ def main() -> None:
     parser.add_argument("--camera", type=int, default=0)
     parser.add_argument("--feed-duration", type=float, default=WarehouseConfig.feed_duration,
                         help="Время прокрутки после распознавания, в секундах (по умолчанию 0.3)")
+    parser.add_argument("--weight-scale", type=float, required=True,
+                        help="Коэффициент калибровки HX711 в отсчётах на грамм")
+    parser.add_argument("--weight-limits", type=float, nargs=2,
+                        default=WarehouseConfig.weight_limits, metavar=("G1", "G2"),
+                        help="Границы трёх весовых рядов в граммах (по умолчанию 5 и 12)")
+    parser.add_argument("--min-weight", type=float, default=WarehouseConfig.min_weight,
+                        help="Минимальная масса предмета в граммах; нулевой вес всегда отклоняется")
     parser.add_argument("--roi", type=int, nargs=4, metavar=("X", "Y", "WIDTH", "HEIGHT"),
                         help="Заменить область по умолчанию: X Y WIDTH HEIGHT в пикселях фактического кадра")
     args = parser.parse_args()
     try:
-        config = WarehouseConfig(feed_duration=args.feed_duration)
+        if not math.isfinite(args.weight_scale) or not 1e-6 <= abs(args.weight_scale) <= 1e9:
+            raise ValueError("Модуль --weight-scale должен быть от 1e-6 до 1e9")
+        config = WarehouseConfig(feed_duration=args.feed_duration,
+                                 weight_limits=tuple(args.weight_limits), min_weight=args.min_weight)
         config.validate()
         from camera import Camera
         with ExitStack() as resources:
             camera = Camera(camera_index=args.camera, roi=args.roi)
             resources.callback(camera.disconnect)
-            hardware = createHardware(args.backend, args.port, args.baudrate)
+            hardware = createHardware(args.backend, args.port, args.baudrate, args.weight_scale)
             # runWarehouse останавливает и отключает оборудование даже при ошибке.
             runWarehouse(hardware, camera, config)
     except KeyboardInterrupt:

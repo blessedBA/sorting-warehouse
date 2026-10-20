@@ -1,0 +1,4 @@
+(sym_lib_table
+  (version 7)
+  (lib (name "Warehouse_Modules")(type "KiCad")(uri "${KIPRJMOD}/Warehouse_Modules.kicad_sym")(options "")(descr "Ready-made warehouse modules"))
+)

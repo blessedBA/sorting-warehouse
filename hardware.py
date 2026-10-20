@@ -7,7 +7,7 @@ import serial
 
 
 class Hardware:
-    """Перемещение головки по XY, управление сервоприводом и конвейером.
+    """Перемещение головки по XY, управление серво, конвейером и весами HX711.
 
     Протокол обновлённого скетча: ASCII, строки с '\\n', 115200 бод, координаты
     в миллиметрах. OK подтверждает команду, DONE — окончание выдачи шагов XY.
@@ -16,9 +16,10 @@ class Hardware:
     """
 
     def __init__(self, com_port: str = "COM3", baudrate: int = 115200,
-                 timeout: float = 1, startup_timeout: float = 5,
-                 movement_timeout: float = 60, servo_settle_time: float | None = 0.5):
-        for value in (timeout, startup_timeout, movement_timeout):
+                 timeout: float = 1, startup_timeout: float = 10,
+                 movement_timeout: float = 60, servo_settle_time: float | None = 0.5,
+                 weight_timeout: float = 5):
+        for value in (timeout, startup_timeout, movement_timeout, weight_timeout):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError("Таймауты должны быть конечными положительными числами")
         if servo_settle_time is not None and (not math.isfinite(servo_settle_time) or servo_settle_time <= 0):
@@ -31,6 +32,7 @@ class Hardware:
         self.startup_timeout = startup_timeout
         self.movement_timeout = movement_timeout
         self.servo_settle_time = servo_settle_time
+        self.weight_timeout = weight_timeout
         self.arduino = None
         self._response_buffer = bytearray()
         self._synchronized = False
@@ -115,7 +117,11 @@ class Hardware:
                 raise RuntimeError(f"Некорректные координаты Arduino: {response}")
         elif response in ("CONVEYOR ON", "CONVEYOR OFF"):
             self._conveyor_state = (response == "CONVEYOR ON")
-        elif response in ("ERROR", "UNKNOWN"):
+        elif response.startswith(("WEIGHT ", "SCALE ")):
+            self._parseMeasurement(response)
+        elif response == "TARED":
+            pass
+        elif response in ("ERROR", "UNKNOWN") or response.startswith("ERROR "):
             raise RuntimeError(f"Arduino отклонила команду: {response}")
         elif response == "READY":
             raise RuntimeError("Arduino перезапустилась; координаты сброшены")
@@ -130,14 +136,17 @@ class Hardware:
                 response = self._readLine(deadline)
                 if response == "READY" and expected == "READY":
                     return [response]
+                if recovering and (response in ("ERROR", "UNKNOWN") or response.startswith("ERROR ")):
+                    responses.append(response)
+                    continue
                 self._handleResponse(response)
                 responses.append(response)
                 if isinstance(expected, (list, tuple)):
                     if response in expected:
                         return responses
                 elif response == expected or \
-                     (expected == "POS" and response.startswith("POS ")) or \
-                     (expected == "CONVEYOR" and response.startswith("CONVEYOR ")):
+                     (expected in ("POS", "CONVEYOR", "WEIGHT", "SCALE")
+                      and response.startswith(expected + " ")):
                     return responses
                 # DONE может прийти от предыдущего движения до ответа на новую команду.
                 # STOPPED служит границей синхронизации после запоздалых ответов.
@@ -147,13 +156,15 @@ class Hardware:
             self._synchronized = False
             raise
 
-    def _request(self, command: str, expected) -> list[str]:
+    def _request(self, command: str, expected, timeout: float | None = None) -> list[str]:
         self._checkConnection()
         if not self._synchronized and command != "STOP":
             raise RuntimeError("Протокол рассинхронизирован. Вызовите stop() или переподключитесь.")
         try:
             self.send(command)
-            return self._waitForResponse(expected, self.timeout, recovering=command == "STOP")
+            return self._waitForResponse(
+                expected, self.timeout if timeout is None else timeout, recovering=command == "STOP"
+            )
         except Exception:
             self._synchronized = False
             raise
@@ -208,7 +219,7 @@ class Hardware:
         return self._request("POS?", "POS")
 
     def stop(self) -> list[str]:
-        """Остановить только XY, дождаться STOPPED; сервопривод команда не останавливает."""
+        """Остановить XY и отменить измерение; серво и конвейер не останавливаются."""
         responses = self._request("STOP", "STOPPED")
         self._synchronized = True
         return responses
@@ -251,13 +262,47 @@ class Hardware:
             return self.conveyor_off()
 
     def get_weight(self) -> float:
-        """TODO: вернуть стабильную массу текущего объекта в граммах после тарирования.
+        """Вернуть усреднённую массу в граммах; HX711 должен быть откалиброван.
 
-        Лента остановлена. Определить протокол TAL222/HX711 и таймаут измерения.
+        Прошивка выдерживает 0,5 с и усредняет 10 новых отсчётов.
+        Лента и головка должны быть остановлены. Отрицательный вес не обрезается.
         """
-        # FIXME
-        return 50
-        raise NotImplementedError("Чтение тензодатчика пока не реализовано")
+        return self._requestMeasurement("WEIGHT?", "WEIGHT")
+
+    @staticmethod
+    def _parseMeasurement(response: str) -> float:
+        parts = response.split()
+        try:
+            if len(parts) != 2:
+                raise ValueError
+            value = float(parts[1])
+            if not math.isfinite(value):
+                raise ValueError
+            if parts[0] == "SCALE" and not 1e-6 <= abs(value) <= 1e9:
+                raise ValueError
+        except ValueError as error:
+            raise RuntimeError(f"Некорректное измерение Arduino: {response}") from error
+        return value
+
+    def _requestMeasurement(self, command: str, expected: str) -> float:
+        responses = self._request(command, expected, timeout=self.weight_timeout)
+        return self._parseMeasurement(responses[-1])
+
+    def tareWeight(self) -> list[str]:
+        """Повторно тарировать пустую неподвижную тару, сохранив коэффициент."""
+        return self._request("TARE", "TARED", timeout=self.weight_timeout)
+
+    def setWeightScale(self, scale: float) -> float:
+        """Задать коэффициент HX711 в отсчётах/г; знак зависит от подключения."""
+        if not math.isfinite(scale) or not 1e-6 <= abs(scale) <= 1e9:
+            raise ValueError("Модуль коэффициента HX711 должен быть от 1e-6 до 1e9")
+        return self._requestMeasurement(f"SCALE {scale:.9g}", "SCALE")
+
+    def calibrateWeight(self, known_weight: float) -> float:
+        """После тарирования положить эталон и получить коэффициент отсчётов/г."""
+        if not math.isfinite(known_weight) or not 0 < known_weight <= 1e9:
+            raise ValueError("Масса эталона должна быть положительной и не больше 1e9 г")
+        return self._requestMeasurement(f"CALIBRATE {known_weight:.9g}", "SCALE")
 
     def waitForMovement(self) -> None:
         """Дождаться DONE по XY в пределах movement_timeout; датчиков позиции нет."""
