@@ -8,7 +8,7 @@
 // Ось Y
 #define Y_STEP_PIN 8
 #define Y_DIR_PIN  2
-#define Y_EN_PIN   10
+#define Y_EN_PIN   4
 
 #define SERVO_PIN 5
 

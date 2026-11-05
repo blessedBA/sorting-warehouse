@@ -112,13 +112,18 @@ class FastWeightTests(unittest.TestCase):
                 hardware, show_weight, _, _ = self.run_console(command)
                 show_weight.assert_called_once_with(hardware, continuous=continuous, fast=fast)
 
-    def test_fast_mode_does_not_access_hardware_during_sorting(self):
-        hardware, show_weight, show_sorting, output = self.run_console(
-            "weight fast continuous", sorting=True)
-        show_weight.assert_not_called()
-        show_sorting.assert_not_called()
-        hardware.get_weight.assert_not_called()
-        self.assertIn("Быстрый вес доступен после main stop", output)
+    def testFastModeShowsSorterReadingsWithoutAccessingHardware(self):
+        for command, continuous in [
+            ("weight fast", False),
+            ("weight fast continuous", True),
+            ("weight continuous FAST", True),
+        ]:
+            with self.subTest(command=command):
+                hardware, show_weight, show_sorting, output = self.run_console(command, sorting=True)
+                show_weight.assert_not_called()
+                show_sorting.assert_called_once_with(unittest.mock.ANY, continuous=continuous)
+                hardware.get_weight.assert_not_called()
+                self.assertNotIn("Быстрый вес доступен после main stop", output)
 
     def test_normal_view_during_sorting_is_passive(self):
         _, show_weight, show_sorting, _ = self.run_console("weight continuous", sorting=True)

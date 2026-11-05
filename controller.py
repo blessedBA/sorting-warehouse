@@ -64,8 +64,9 @@ def showHelp() -> None:
     print("  main log      - открыть журнал сортировщика в отдельном окне терминала")
     print("  help          - список команд")
     print("  quit          - остановить сортировку и выйти")
-    print("При сортировке доступны main, weight [continuous], help, stop, quit/exit.")
-    print("weight показывает измерения сортировщика; новые запросы к весам не отправляются.")
+    print("При сортировке доступны main, weight [fast] [continuous], help, stop, quit/exit.")
+    print("weight с fast и без него показывает быстрые измерения сортировщика; "
+          "новые запросы к весам не отправляются.")
     print()
 
 
@@ -134,7 +135,7 @@ def main() -> None:
                 continue
             if session.isRunning() and cmd not in ("weight", "stop", "quit", "exit"):
                 print("Команда недоступна во время сортировки. Доступны: "
-                      "weight [continuous], main status, main log, main stop, help, stop, quit.")
+                      "weight [fast] [continuous], main status, main log, main stop, help, stop, quit.")
                 continue
 
             # -------------------------
@@ -156,9 +157,6 @@ def main() -> None:
                         fast = "fast" in options
                         continuous = "continuous" in options
                         if session.isRunning():
-                            if fast:
-                                raise ValueError("Быстрый вес доступен после main stop. "
-                                                 "При сортировке используйте weight [continuous].")
                             showSortingWeight(session, continuous=continuous)
                         else:
                             showWeight(hardware, continuous=continuous, fast=fast)
