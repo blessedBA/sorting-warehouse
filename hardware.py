@@ -265,14 +265,16 @@ class Hardware:
         else:
             return self.conveyor_off()
 
-    def get_weight(self) -> float:
+    def get_weight(self, *, fast: bool = False) -> float:
         """Вернуть усреднённую массу в граммах; HX711 должен быть откалиброван.
 
-        Прошивка выдерживает 0,5 с и усредняет 10 новых отсчётов.
+        Обычно прошивка выдерживает 0,5 с и усредняет 10 новых отсчётов.
+        fast=True: 2 новых отсчёта без выдержки; показания менее сглажены.
+        Быстрый режим требует прошивки с командой WEIGHT_FAST?.
         Головка должна быть остановлена; лента может работать.
         Отрицательный вес не обрезается.
         """
-        return self._requestMeasurement("WEIGHT?", "WEIGHT")
+        return self._requestMeasurement("WEIGHT_FAST?" if fast else "WEIGHT?", "WEIGHT")
 
     @staticmethod
     def _parseMeasurement(response: str) -> float:

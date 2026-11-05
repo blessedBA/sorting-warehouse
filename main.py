@@ -128,7 +128,7 @@ def waitForObject(hardware, camera, *, skip_current: bool = False, stop_event=No
 def measureWeight(hardware, duration: float, *, on_weight=None, stop_event=None) -> float:
     """Усреднить показания за duration секунд на уже остановленной ленте.
 
-    Каждый get_weight() блокируется до получения серии отсчётов HX711.
+    Быстрый режим усредняет 2 отсчёта HX711 без выдержки в прошивке.
     Последний запрос дочитывается полностью, даже если время уже истекло.
     """
     if not math.isfinite(duration) or duration <= 0:
@@ -138,7 +138,7 @@ def measureWeight(hardware, duration: float, *, on_weight=None, stop_event=None)
     sample_count = 0
     while True:
         checkStopRequested(stop_event)
-        weight = hardware.get_weight()
+        weight = hardware.get_weight(fast=True)
         if on_weight is not None:
             on_weight(weight)
         if not math.isfinite(weight) or weight == 0:

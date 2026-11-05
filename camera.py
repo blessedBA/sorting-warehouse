@@ -1,7 +1,7 @@
 """API камеры конвейера для управляющего скрипта и живого просмотра."""
 
 import sys
-from time import monotonic
+from time import monotonic, sleep
 
 import cv2
 import numpy as np
@@ -88,15 +88,50 @@ class Camera:
             raise
 
     def getFrame(self) -> np.ndarray:
-        """Считать следующий BGR-кадр; ошибка камеры отличается от отсутствия предмета."""
+        """Считать следующий BGR-кадр с восстановлением после транзиентных сбоев.
+
+        Отсутствие предмета в ROI — не ошибка камеры; здесь обрабатывается только
+        невозможность получить кадр. После нескольких неудачных чтений устройство
+        переоткрывается — это лечит типичный «залипший» буфер V4L2/AVFoundation.
+        """
         if self.capture is None:
             self.resetDetection()
             raise RuntimeError("Камера не подключена. Вызовите init().")
-        success, frame = self.capture.read()
-        if not success or frame is None:
-            self.resetDetection()
-            raise RuntimeError("Камера перестала передавать изображение. Проверьте подключение и перезапустите программу.")
-        return frame
+
+        def _try_read() -> np.ndarray | None:
+            success, frame = self.capture.read()
+            return frame if success and frame is not None else None
+
+        # 1) Быстрая попытка — обычно срабатывает с первого раза.
+        frame = _try_read()
+        if frame is not None:
+            return frame
+
+    # 2) Короткий ретрай: бэкенду нужно дать время снова наполнить очередь.
+        for _ in range(3):
+            sleep(0.05)
+            frame = _try_read()
+            if frame is not None:
+                return frame
+
+    # 3) Переоткрытие устройства: сбрасывает залипший внутренний буфер.
+    #    init() сам вызовет disconnect() и бросит RuntimeError с подробной
+    #    диагностикой (питание, разрешения, занятость устройства).
+        reportMessage("Камера не отдаёт кадры, переоткрытие устройства…", self.message_sink)
+        self.disconnect()
+        self.init()
+
+        frame = _try_read()
+        if frame is not None:
+            return frame
+
+    # 4) Всё плохо — фиксируем ошибку и сбрасываем состояние распознавания,
+    #    чтобы «предмет с прошлого кадра» не переехал на следующий.
+        self.resetDetection()
+        raise RuntimeError(
+            "Камера перестала передавать изображение даже после переоткрытия. "
+            "Проверьте подключение, питание USB-хаба и закройте другие программы с камерой."
+        )
 
     def getRoi(self, frame: np.ndarray) -> tuple:
         """Одна область для распознавания и отображения её границы."""

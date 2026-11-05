@@ -8,7 +8,7 @@
 // Ось Y
 #define Y_STEP_PIN 8
 #define Y_DIR_PIN  2
-#define Y_EN_PIN   4
+#define Y_EN_PIN   10
 
 #define SERVO_PIN 5
 
@@ -17,7 +17,7 @@
 #define CONVEYOR_DIR_PIN 7   // IN1 (направление)
 
 #define HX711_DATA_PIN A5   // DT / DOUT
-#define HX711_CLOCK_PIN A4  // SCK / CLK
+#define HX711_CLOCK_PIN A4  // S/ CLK
 
 // =============================
 // Настройки скорости конвейера
@@ -55,7 +55,8 @@ Servo my_servo;
 const unsigned long SCALE_TIMEOUT_MS = 4000;
 const unsigned long SCALE_SETTLE_MS = 500;
 const uint8_t SCALE_SAMPLES = 10;
-enum ScaleOperation { ScaleIdle, ScaleStartup, ScaleTare, ScaleWeight, ScaleCalibrate };
+const uint8_t SCALE_FAST_SAMPLES = 2;
+enum ScaleOperation { ScaleIdle, ScaleStartup, ScaleTare, ScaleWeight, ScaleWeightFast, ScaleCalibrate };
 ScaleOperation scale_operation = ScaleIdle;
 unsigned long scale_started = 0;
 long scale_sum = 0;
@@ -125,7 +126,8 @@ void updateScale() {
   if (digitalRead(HX711_DATA_PIN) != LOW) return;
   long sample = readHx711();
   // Удаляем старый отсчёт, затем непрерывно читаем во время успокоения.
-  if (scale_discard_first || elapsed < SCALE_SETTLE_MS) {
+  unsigned long settle_ms = scale_operation == ScaleWeightFast ? 0 : SCALE_SETTLE_MS;
+  if (scale_discard_first || elapsed < settle_ms) {
     scale_discard_first = false;
     return;
   }
@@ -134,9 +136,10 @@ void updateScale() {
     return;
   }
   scale_sum += sample;  // 10 * 24 бита укладываются в signed long.
-  if (++scale_samples < SCALE_SAMPLES) return;
+  uint8_t samples_required = scale_operation == ScaleWeightFast ? SCALE_FAST_SAMPLES : SCALE_SAMPLES;
+  if (++scale_samples < samples_required) return;
 
-  float average = static_cast<float>(scale_sum) / SCALE_SAMPLES;
+  float average = static_cast<float>(scale_sum) / samples_required;
   ScaleOperation completed = scale_operation;
   scale_operation = ScaleIdle;
   if (completed == ScaleStartup || completed == ScaleTare) {
@@ -289,10 +292,11 @@ void processCommand(String command) {
     Serial.println(F("ERROR HX711_BUSY"));
     return;
   }
-  if (command == "TARE" || command == "WEIGHT?" ||
+  bool weight_request = command == "WEIGHT?" || command == "WEIGHT_FAST?";
+  if (command == "TARE" || weight_request ||
       command.startsWith("SCALE ") || command.startsWith("CALIBRATE ")) {
     // Чтение веса разрешено при работающей ленте для диагностики.
-    if (movement_in_progress || (conveyor_state && command != "WEIGHT?")) {
+    if (movement_in_progress || (conveyor_state && !weight_request)) {
       Serial.println(F("ERROR HX711_MOVING"));
       return;
     }
@@ -309,12 +313,12 @@ void processCommand(String command) {
       Serial.println(scale_factor, 6);
     } else if (!scale_tared) {
       Serial.println(F("ERROR HX711_NOT_TARED"));
-    } else if (command == "WEIGHT?") {
+    } else if (weight_request) {
       if (!validScaleFactor(scale_factor)) {
         Serial.println(F("ERROR HX711_NOT_CALIBRATED"));
         return;
       }
-      startScale(ScaleWeight);
+      startScale(command == "WEIGHT_FAST?" ? ScaleWeightFast : ScaleWeight);
     } else {
       if (!parseNumber(command.substring(10), calibration_weight) ||
           calibration_weight <= 0 || calibration_weight > 1e9) {

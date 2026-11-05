@@ -9,7 +9,7 @@ from sorter_log import SorterLog
 from sorting_session import SortingSession, showSortingWeight
 
 
-COM_PORT = "/dev/cu.usbserial-3120"
+COM_PORT = "/dev/cu.usbserial-11220"
 BAUDRATE = 115200
 
 
@@ -18,19 +18,21 @@ def showResponse(responses: list[str]) -> None:
         print("Arduino:", response)
 
 
-def showWeight(hardware: Hardware, continuous: bool = False) -> None:
+def showWeight(hardware: Hardware, continuous: bool = False, *, fast: bool = False) -> None:
     """Вывести массу; в непрерывном режиме Ctrl+C возвращает к командам."""
     if continuous:
         print("Непрерывное взвешивание. Ctrl+C — вернуться к командам.", flush=True)
+    if fast:
+        print("Быстрый вес: среднее 2 отсчётов без выдержки; показания могут колебаться.", flush=True)
     try:
         while True:
-            print(f"Масса: {hardware.get_weight():.3f} г", flush=True)
+            print(f"Масса: {hardware.get_weight(fast=fast):.3f} г", flush=True)
             if not continuous:
                 return
     except KeyboardInterrupt:
         if not continuous:
             raise
-        # Отменить незавершённый WEIGHT? и прочитать ответы до STOPPED.
+        # Отменить незавершённое измерение и прочитать ответы до STOPPED.
         hardware.stop()
         print("\nНепрерывное взвешивание остановлено.")
 
@@ -55,6 +57,7 @@ def showHelp() -> None:
     print("  scale K       - задать сохранённый коэффициент отсчётов/г")
     print("  weight        - узнать массу в граммах")
     print("  weight continuous - непрерывный вывод массы до Ctrl+C")
+    print("  weight fast [continuous] - быстрый вес: 2 отсчёта без выдержки")
     print("  main start    - запустить сортировку в фоне (main — то же самое)")
     print("  main stop     - остановить сортировку и вернуться к ручному управлению")
     print("  main status   - состояние сортировки и последняя ошибка")
@@ -147,12 +150,18 @@ def main() -> None:
                         session.weight_scale = factor
                         print(f"Коэффициент: {factor:.9g}; для main.py: --weight-scale={factor:.9g}")
                     elif cmd == "weight":
-                        if len(parts) > 2 or (len(parts) == 2 and parts[1].lower() != "continuous"):
-                            raise ValueError("Использование: weight [continuous]")
+                        options = [part.lower() for part in parts[1:]]
+                        if len(options) != len(set(options)) or set(options) - {"fast", "continuous"}:
+                            raise ValueError("Использование: weight [fast] [continuous]")
+                        fast = "fast" in options
+                        continuous = "continuous" in options
                         if session.isRunning():
-                            showSortingWeight(session, continuous=len(parts) == 2)
+                            if fast:
+                                raise ValueError("Быстрый вес доступен после main stop. "
+                                                 "При сортировке используйте weight [continuous].")
+                            showSortingWeight(session, continuous=continuous)
                         else:
-                            showWeight(hardware, continuous=len(parts) == 2)
+                            showWeight(hardware, continuous=continuous, fast=fast)
                     elif len(parts) != 1:
                         raise ValueError(f"Использование: {cmd}")
                     elif cmd == "tare":
