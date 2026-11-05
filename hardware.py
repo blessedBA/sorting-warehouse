@@ -40,6 +40,8 @@ class Hardware:
         self._servo_pending = False
         self._servo_command_time = 0.0
         self._conveyor_state = False
+        # Событие принадлежит владельцу оборудования; serial по-прежнему читает один поток.
+        self.cancel_event = None
         self.init()
 
     def init(self) -> None:
@@ -74,6 +76,8 @@ class Hardware:
             raise RuntimeError("Команда передана в serial-порт не полностью")
 
     def _checkConnection(self) -> None:
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            raise InterruptedError("Запрошена остановка сортировки")
         if self.arduino is None or not self.arduino.is_open:
             raise RuntimeError("Arduino не подключена. Вызовите init().")
 
@@ -86,8 +90,8 @@ class Hardware:
         return line.decode("ascii").strip()
 
     def _readLine(self, deadline: float) -> str:
-        self._checkConnection()
         while True:
+            self._checkConnection()
             response = self._popResponse()
             if response:
                 return response
@@ -265,7 +269,8 @@ class Hardware:
         """Вернуть усреднённую массу в граммах; HX711 должен быть откалиброван.
 
         Прошивка выдерживает 0,5 с и усредняет 10 новых отсчётов.
-        Лента и головка должны быть остановлены. Отрицательный вес не обрезается.
+        Головка должна быть остановлена; лента может работать.
+        Отрицательный вес не обрезается.
         """
         return self._requestMeasurement("WEIGHT?", "WEIGHT")
 
@@ -325,8 +330,15 @@ class Hardware:
                 raise NotImplementedError("Задайте servo_settle_time: прошивка не сообщает о завершении движения серво")
             remaining = self._servo_command_time + self.servo_settle_time - time.monotonic()
             if remaining > 0:
-                time.sleep(remaining)
+                self.waitForDelay(remaining)
             self._servo_pending = False
+
+    def waitForDelay(self, duration: float) -> None:
+        """Выдержать паузу с возможностью остановки владельцем оборудования."""
+        if self.cancel_event is None:
+            time.sleep(duration)
+        elif self.cancel_event.wait(duration):
+            raise InterruptedError("Запрошена остановка сортировки")
 
     def feedOneObject(self, duration: float = 0.3) -> None:
         """Прокрутить ленту duration секунд и остановить, в том числе при прерывании.
@@ -338,13 +350,13 @@ class Hardware:
             raise ValueError("Время подачи должно быть конечным положительным числом")
         try:
             self.conveyor_on()
-            time.sleep(duration)
+            self.waitForDelay(duration)
         finally:
             self.conveyor_off()
 
     def waitForUnload(self) -> None:
         """Выдержать полсекунды на выпадение предмета перед закрытием затвора."""
-        time.sleep(0.5)
+        self.waitForDelay(0.5)
 
     def disconnect(self) -> None:
         """Отправить STOP и освободить порт, даже если отправка не удалась."""

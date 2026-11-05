@@ -1,11 +1,13 @@
 """API камеры конвейера для управляющего скрипта и живого просмотра."""
 
 import sys
+from time import monotonic
 
 import cv2
 import numpy as np
 
 from color_detector import ObjectNotFound, detectColor, drawResult, validateSizeLimits
+from sorter_log import reportMessage
 
 
 # Прямоугольная область по отметке на скриншоте 30.09.2026, без заголовка окна.
@@ -39,7 +41,8 @@ class Camera:
     def __init__(self, camera_index: int = 0, width: int = 960,
                  height: int = 540, roi: tuple | None = None,
                  background: str = "white", *, min_area_fraction: float = 0.002,
-                 min_width: int = 8, min_height: int = 8, confirmation_frames: int = 3):
+                 min_width: int = 8, min_height: int = 8, confirmation_frames: int = 3,
+                 message_sink=None):
         if camera_index < 0 or min(width, height) < 32:
             raise ValueError("Индекс камеры должен быть неотрицательным, размеры кадра — не менее 32×32.")
         if background not in ("white", "black"):
@@ -57,6 +60,8 @@ class Camera:
         self.min_width = min_width
         self.min_height = min_height
         self.confirmation_frames = confirmation_frames
+        self.message_sink = message_sink
+        self._last_missing_message_time = float("-inf")
         self.resetDetection()
         self.capture = None
         self.init()
@@ -170,10 +175,11 @@ class Camera:
         при исчезновении предмета результат и счётчик сразу сбрасываются.
         """
         _, result, _ = self.processFrame(frame)
-        if result is not None:
-            print(result["color"])
-        else:
-            print("Объект или цвет не обнаружен!")
+        if result is None:
+            current_time = monotonic()
+            if current_time - self._last_missing_message_time >= 2.0:
+                reportMessage("Объект или цвет не обнаружен!", self.message_sink)
+                self._last_missing_message_time = current_time
         return result
 
     def isObjectReady(self, result: dict | None) -> bool:

@@ -6,8 +6,8 @@
 #define X_DIR_PIN  12
 #define X_EN_PIN   11
 // Ось Y
-#define Y_STEP_PIN 2
-#define Y_DIR_PIN  3
+#define Y_STEP_PIN 8
+#define Y_DIR_PIN  2
 #define Y_EN_PIN   4
 
 #define SERVO_PIN 5
@@ -23,7 +23,7 @@
 // Настройки скорости конвейера
 // =============================
 // Скважность в процентах (0..100)
-int CONVEYOR_DUTY_PERCENT = 70;  // при необходимости увеличьте
+int CONVEYOR_DUTY_PERCENT = 60;  // при необходимости увеличьте
 
 // =============================
 // Настройки движения
@@ -291,7 +291,8 @@ void processCommand(String command) {
   }
   if (command == "TARE" || command == "WEIGHT?" ||
       command.startsWith("SCALE ") || command.startsWith("CALIBRATE ")) {
-    if (movement_in_progress || conveyor_state) {
+    // Чтение веса разрешено при работающей ленте для диагностики.
+    if (movement_in_progress || (conveyor_state && command != "WEIGHT?")) {
       Serial.println(F("ERROR HX711_MOVING"));
       return;
     }
