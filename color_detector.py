@@ -22,6 +22,13 @@ color_names = {
 }
 
 
+# Цветовой тон учитывается только при достаточном сигнале в каналах:
+# высокая относительная насыщенность почти чёрного шума ещё не означает цвет.
+MIN_COLOR_SATURATION = 35
+MIN_COLOR_VALUE = 25
+MIN_COLOR_CHROMA = 15
+
+
 class ObjectNotFound(ValueError):
     """В кадре нет достаточно крупного предмета, отличающегося от фона."""
 
@@ -35,7 +42,8 @@ def readImage(image_path: Path) -> np.ndarray:
 
 
 def foregroundMask(image: np.ndarray, brightness_threshold: float,
-                   background: str = "white") -> np.ndarray:
+                   background: str = "white", *, background_saturation: float = 0,
+                   background_chroma: float = 0) -> np.ndarray:
     """Пиксели предмета, отличающиеся от фона.
 
     background="white" — фон светлый/белый: предмет тёмный или насыщенный.
@@ -44,10 +52,14 @@ def foregroundMask(image: np.ndarray, brightness_threshold: float,
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     saturation, value = hsv[:, :, 1], hsv[:, :, 2]
     chroma = image.max(axis=2).astype(np.int16) - image.min(axis=2)
-    colorful = (saturation >= 65) & (value >= 65) & (chroma >= 40)
     if background == "white":
-        # Белый фон: фон яркий и почти не насыщенный, предмет — темнее или цветной.
-        return (value < brightness_threshold) | colorful
+        # Цветные предметы могут иметь ту же V, что и лента. Учитываем также
+        # оттенок самой ленты при тёплом освещении, чтобы не выделять весь фон.
+        colorful = ((saturation >= max(MIN_COLOR_SATURATION, background_saturation + 10))
+                    & (value >= MIN_COLOR_VALUE)
+                    & (chroma >= max(MIN_COLOR_CHROMA, background_chroma + 8)))
+        return (value <= brightness_threshold) | colorful
+    colorful = (saturation >= 65) & (value >= 65) & (chroma >= 40)
     return (value > brightness_threshold) | colorful
 
 
@@ -79,15 +91,24 @@ def segmentObject(image: np.ndarray, roi: tuple | None = None,
     filtered = cv2.medianBlur(crop, 3)
     hsv = cv2.cvtColor(filtered, cv2.COLOR_BGR2HSV)
     value = hsv[:, :, 2]
-    otsu_threshold, _ = cv2.threshold(value, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    background_saturation = background_chroma = 0
     if background == "white":
-        # Фон — самая яркая часть кадра; Otsu отделяет тёмный предмет от белого.
-        brightness_threshold = min(240, max(30, otsu_threshold))
+        # Предмет не должен касаться края ROI, поэтому края дают образец ленты.
+        # Otsu по всему кадру может разделить сам предмет на светлую поверхность
+        # и тёмное пятно: тогда цвет вычисляется только по пятну или тени.
+        border = np.concatenate((hsv[0], hsv[-1], hsv[:, 0], hsv[:, -1]))
+        brightness_threshold = max(0, float(np.percentile(border[:, 2], 10)) - 12)
+        background_saturation = float(np.percentile(border[:, 1], 90))
+        border_chroma = border[:, 1].astype(float) * border[:, 2] / 255
+        background_chroma = float(np.percentile(border_chroma, 90))
     else:
+        otsu_threshold, _ = cv2.threshold(value, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         brightness_threshold = max(95, otsu_threshold)
     # Яркость (для белого/серого/чёрного) + насыщенность и разность каналов
     # (для цветных предметов, которые могут быть близки по яркости к фону).
-    foreground = foregroundMask(filtered, brightness_threshold, background).astype(np.uint8)
+    foreground = foregroundMask(filtered, brightness_threshold, background,
+                                background_saturation=background_saturation,
+                                background_chroma=background_chroma).astype(np.uint8)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(foreground, connectivity=8)
     # Области, выходящие за край кадра/ROI, не считаются предметами.
     border_labels = np.unique(np.concatenate((labels[0], labels[-1], labels[:, 0], labels[:, -1])))
@@ -103,7 +124,9 @@ def segmentObject(image: np.ndarray, roi: tuple | None = None,
     object_label = max(candidates, key=lambda label: stats[label, cv2.CC_STAT_AREA])
     selected = labels == object_label
     # Проверяем исходные пиксели: сглаживание не должно добавлять фон в маску.
-    original_foreground = foregroundMask(crop, brightness_threshold, background)
+    original_foreground = foregroundMask(crop, brightness_threshold, background,
+                                        background_saturation=background_saturation,
+                                        background_chroma=background_chroma)
     object_mask = np.zeros((height, width), dtype=np.uint8)
     object_mask[y:y + roi_height, x:x + roi_width] = (selected & original_foreground).astype(np.uint8) * 255
     _, _, object_width, object_height = cv2.boundingRect(object_mask)
@@ -117,6 +140,9 @@ def classifyPixels(pixels: np.ndarray) -> np.ndarray:
     """Базовые классы цвета по HSV; H в OpenCV лежит в диапазоне 0…179."""
     hsv = cv2.cvtColor(pixels.reshape(-1, 1, 3), cv2.COLOR_BGR2HSV).reshape(-1, 3)
     hue, saturation, value = hsv.T
+    chroma = pixels.max(axis=1).astype(np.int16) - pixels.min(axis=1)
+    chromatic = ((saturation >= MIN_COLOR_SATURATION) & (value >= MIN_COLOR_VALUE)
+                 & (chroma >= MIN_COLOR_CHROMA))
     names = np.full(len(pixels), "red", dtype="<U6")
     hue_ranges = [
         (10, 23, "orange"), (23, 35, "yellow"), (35, 85, "green"),
@@ -127,9 +153,11 @@ def classifyPixels(pixels: np.ndarray) -> np.ndarray:
         names[(hue >= lower) & (hue < upper)] = name
     names[(hue >= 5) & (hue < 25) & (value < 170)] = "brown"
     names[((hue < 10) | (hue >= 155)) & (saturation < 130) & (value >= 170)] = "pink"
-    names[saturation < 45] = "gray"
-    names[(saturation < 45) & (value >= 200)] = "white"
-    names[(value < 45) | ((saturation < 60) & (value < 95))] = "black"
+    # Тёмный насыщенный красный/синий сохраняет оттенок. Чёрный выбирается
+    # по низкой яркости только при отсутствии надёжной цветовой составляющей.
+    names[~chromatic] = "gray"
+    names[(~chromatic) & (value >= 200)] = "white"
+    names[(~chromatic) & (value < 95)] = "black"
     return names
 
 
