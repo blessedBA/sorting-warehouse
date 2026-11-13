@@ -1,0 +1,137 @@
+% !TeX program = xelatex
+% !LW recipe = latexmk (xelatex)
+\synctex=1
+\RequirePackage{fix-cm}
+\documentclass[12pt,a4paper,landscape]{article}
+\usepackage[margin=0mm]{geometry}
+\usepackage{fontspec}
+\setmainfont{DejaVuSans}[
+  Extension=.ttf,
+  UprightFont=*,
+  BoldFont=*-Bold,
+  ItalicFont=*-Oblique,
+  BoldItalicFont=*-BoldOblique]
+\usepackage[russian]{babel}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,calc}
+\usepackage{qrcode}
+\usepackage{hyperref}
+\hypersetup{hidelinks,pdftitle={Сортировщик для мини-склада},
+  pdfauthor={Малышев Павел; Войлов Антон; Янковец Александр},
+  pdfsubject={Лифлет проекта ППП}}
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0pt}
+\hyphenpenalty=10000
+\exhyphenpenalty=10000
+\definecolor{ink}{gray}{0.08}
+\definecolor{muted}{gray}{0.30}
+\definecolor{rulegray}{gray}{0.68}
+\newcommand{\bodyFont}{\fontsize{12bp}{15bp}\selectfont}
+\newcommand{\sectionLabel}[2]{{\fontsize{13bp}{16bp}\selectfont\bfseries #1\enspace #2}}
+\newcommand{\subLabel}[1]{{\bfseries #1}\par\vspace{2mm}}
+\newcommand{\commandText}[1]{\mbox{\textbf{#1}}}
+% All coordinates below are millimetres from the top-left of the page.
+\newcommand{\putBlock}[4]{%
+  \node[anchor=north west,inner sep=0pt,outer sep=0pt,
+        text width=#3mm,align=left,font=\bodyFont] at (#1,-#2)
+        {\raggedright #4};}
+\newcommand{\pageFrame}[2]{%
+  \putBlock{12}{9}{210}{\textbf{SORTING WAREHOUSE}\enspace /\enspace ППП}
+  \draw[line width=.6pt] (12,-18)--(285,-18);
+  \draw[rulegray,line width=.4pt] (12,-198)--(285,-198);
+  \putBlock{12}{201}{240}{\color{muted}#1}
+  \putBlock{266}{201}{20}{\hfill #2\,/\,2}}
+\newcommand{\teamMember}[4]{%
+  \putBlock{#1}{162}{54}{\textbf{#2}\\#3\par\vspace{2mm}#4}}
+\newcommand{\stepBlock}[3]{%
+  \putBlock{193}{#1}{8}{\textbf{#2}}
+  \putBlock{203}{#1}{82}{#3}}
+\begin{document}
+\bodyFont\color{ink}
+\null
+\begin{tikzpicture}[remember picture,overlay,x=1mm,y=1mm]
+\begin{scope}[shift={(current page.north west)}]
+  \pageFrame{Учебный прототип автоматизированного склада}{1}
+  \putBlock{12}{25}{108}{\sectionLabel{01}{О проекте}}
+  \putBlock{12}{35}{110}{{\fontsize{26bp}{29bp}\selectfont\bfseries
+    Сортировщик\\для мини-склада}}
+  \putBlock{12}{61}{101}{Учебный прототип принимает предметы с конвейера
+    и распределяет их по девяти ячейкам. Камера определяет цвет, весы измеряют
+    массу, а головка переносит предмет в выбранный ряд.}
+  \putBlock{12}{102}{108}{\sectionLabel{04}{Инженерная задача}}
+  \putBlock{12}{112}{102}{Согласовать распознавание, взвешивание и перемещение
+    в одном цикле. Главный вызов — снизить влияние вибраций на весы и подать
+    предмет точно в приёмную головку.}
+
+  \putBlock{127}{25}{158}{\sectionLabel{06}{Устройство в сборе}}
+  \node[anchor=north west,inner sep=0pt,outer sep=0pt] at (127,-34)
+    {\input{device_sketch.tex}};
+  \putBlock{127}{124}{158}{\textbf{1} Конвейер\quad \textbf{2} Камера\quad
+    \textbf{3} Головка XY\\
+    \textbf{4} Девять ячеек\quad \textbf{5} Электроника}
+
+  \draw[rulegray,line width=.4pt] (12,-148)--(285,-148);
+  \putBlock{12}{152}{170}{\textbf{Команда}\enspace /\enspace группа Б01-506}
+  \teamMember{12}{Малышев}{Павел Георгиевич}{Программная часть}
+  \teamMember{70}{Войлов}{Антон Евгеньевич}{CAD и сборка}
+  \teamMember{128}{Янковец}{Александр Сергеевич}{Сборка и электроника}
+  \putBlock{12}{190}{180}{Ментор: Негодяев Андрей Сергеевич}
+
+  \putBlock{199}{152}{38}{\textbf{GitHub}}
+  \putBlock{247}{152}{38}{\textbf{Telegram}}
+  \node[anchor=north west,inner sep=0pt] at (199,-161)
+    {\qrcode[height=26mm,level=M]{https://github.com/blessedBA/sorting-warehouse}};
+  \node[anchor=north west,inner sep=0pt] at (247,-161)
+    {\qrcode[height=26mm,level=M]{https://t.me/sortirovachka}};
+  \putBlock{195}{190}{45}{\href{https://github.com/blessedBA/sorting-warehouse}{Код проекта}}
+  \putBlock{242}{190}{43}{\href{https://t.me/sortirovachka}{ПП Сортировщик}}
+\end{scope}
+\end{tikzpicture}
+\newpage
+\null
+\begin{tikzpicture}[remember picture,overlay,x=1mm,y=1mm]
+\begin{scope}[shift={(current page.north west)}]
+  \pageFrame{Python + OpenCV\enspace /\enspace Arduino\enspace /\enspace HX711}{2}
+  \draw[rulegray,line width=.4pt] (185,-25)--(185,-192);
+  \putBlock{12}{25}{171}{\sectionLabel{02}{Технические характеристики}}
+  \putBlock{12}{36}{52}{\subLabel{Сенсоры}
+    Камера — наличие и цвет предмета.\\[2mm]
+    Тензодатчик TAL 222 и АЦП HX711 — масса.}
+  \putBlock{70}{36}{52}{\subLabel{Управление}
+    Компьютер с Python/OpenCV — анализ и выбор ячейки.\\[2mm]
+    Arduino Uno — управление механизмами.}
+  \putBlock{128}{36}{51}{\subLabel{Актуаторы}
+    Два шаговых двигателя NEMA17 — XY.\\[2mm]
+    Мотор — конвейер.\\[2mm]
+    Сервопривод SG90 — затвор головки.}
+  \draw[rulegray,line width=.4pt] (12,-89)--(179,-89);
+  \putBlock{12}{93}{167}{\textbf{9 ячеек / 3 весовых ряда}\par\vspace{2mm}
+    0 < m < 5 г\quad /\quad 5 ≤ m < 12 г\quad /\quad m ≥ 12 г\par\vspace{2mm}
+    Внутри ряда ячейка выбирается случайно. Цвет распознаётся, но на маршрут
+    пока не влияет.}
+  \putBlock{12}{124}{168}{\textbf{Функциональная схема}}
+  \begin{scope}[shift={(12,-134)}]
+    \input{functional_diagram.tex}
+  \end{scope}
+
+  \putBlock{193}{25}{92}{\sectionLabel{03}{Как пользоваться}}
+  \stepBlock{36}{1}{Подключить установку. Задать ноль координат, тарировать
+    пустые весы и откалибровать их эталонным грузом.}
+  \stepBlock{64}{2}{При запуске задать пороги массы и время подачи.
+    Положить предмет; в консоли — \commandText{main start}.}
+  \stepBlock{87}{3}{Следить за массой, цветом и ячейкой в журнале.
+    Статус — \commandText{main status}, остановка — \commandText{main stop}.}
+
+  \draw[rulegray,line width=.4pt] (193,-113)--(285,-113);
+  \putBlock{193}{118}{92}{\sectionLabel{05}{Прогресс проекта}}
+  \putBlock{193}{129}{92}{\textbf{Было заявлено}\par
+    Склад на 9 ячеек, перемещение XY, сортировка по цвету и массе.}
+  \putBlock{193}{150}{92}{\textbf{Сделано}\par
+    Собрана механика; реализованы распознавание цвета, взвешивание,
+    цикл по массе и журнал.}
+  \putBlock{193}{176}{92}{\textbf{Осталось}\par
+    Испытать полный цикл и точность; добавить выбор ячейки по цвету.}
+\end{scope}
+\end{tikzpicture}
+\end{document}

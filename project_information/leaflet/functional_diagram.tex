@@ -1,0 +1,19 @@
+% Input inside the page TikZ picture; origin is its top-left corner.
+\tikzset{
+  function_box/.style={draw=ink,line width=.55pt,rounded corners=1mm,
+    minimum height=11mm,align=center,inner sep=1mm,font=\bodyFont,fill=white},
+  signal_arrow/.style={-{Stealth[length=2mm]},line width=.6pt},
+  signal_link/.style={{Stealth[length=2mm]}-{Stealth[length=2mm]},line width=.6pt}}
+\node[function_box,minimum width=32mm] (camera) at (17,-6) {Камера};
+\node[function_box,minimum width=56mm] (computer) at (81,-6) {Компьютер / OpenCV};
+\node[function_box,minimum width=36mm] (arduino) at (81,-28) {Arduino};
+\node[function_box,minimum width=39mm] (weight_sensor) at (20,-28) {Тензодатчик\\+ HX711};
+\node[function_box,minimum width=46mm] (servo) at (144,-28) {Сервопривод\\затвора};
+\node[function_box,minimum width=48mm] (drivers) at (81,-50) {Драйверы};
+\node[function_box,minimum width=46mm] (motors) at (144,-50) {Двигатели\\XY и ленты};
+\draw[signal_arrow] (camera)--(computer);
+\draw[signal_link] (computer)--node[right,font=\bodyFont]{USB} (arduino);
+\draw[signal_arrow] (weight_sensor)--(arduino);
+\draw[signal_arrow] (arduino)--(servo);
+\draw[signal_arrow] (arduino)--(drivers);
+\draw[signal_arrow] (drivers)--(motors);
